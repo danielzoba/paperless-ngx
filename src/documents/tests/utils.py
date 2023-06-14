@@ -1,3 +1,4 @@
+import os
 import shutil
 import tempfile
 from collections import namedtuple
@@ -78,7 +79,29 @@ def paperless_environment():
             remove_dirs(dirs)
 
 
+def fake_magic_from_file(file, mime=False):
+    """
+    Simpler and probably faster replacement for magic.from_file
+    for use in testing
+    """
+    if mime:
+        if os.path.splitext(file)[1] == ".pdf":
+            return "application/pdf"
+        elif os.path.splitext(file)[1] == ".png":
+            return "image/png"
+        elif os.path.splitext(file)[1] == ".webp":
+            return "image/webp"
+        else:
+            return "unknown"
+    else:
+        return "A verbose string that describes the contents of the file"
+
+
 class DirectoriesMixin:
+    """
+    Creates and overrides Django settings related to directories
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dirs = None
@@ -93,6 +116,10 @@ class DirectoriesMixin:
 
 
 class FileSystemAssertsMixin:
+    """
+    Provides some simple assert helps around file and directory existence
+    """
+
     def assertIsFile(self, path: Union[PathLike, str]):
         self.assertTrue(Path(path).resolve().is_file(), f"File does not exist: {path}")
 
@@ -121,16 +148,25 @@ class FileSystemAssertsMixin:
 
 
 class ConsumerProgressMixin:
+    """
+    Mocks out the consumer's send progress and related function calls
+    to prevent attempting to connect to Redis during testing, while
+    capturing the progress information
+    """
+
     def setUp(self) -> None:
         self.send_progress_patcher = mock.patch(
             "documents.consumer.Consumer._send_progress",
         )
         self.send_progress_mock = self.send_progress_patcher.start()
+        self._channel_patcher = mock.patch("documents.consumer.get_channel_layer")
+        self._channel_patcher.start()
         super().setUp()
 
     def tearDown(self) -> None:
         super().tearDown()
         self.send_progress_patcher.stop()
+        self._channel_patcher.stop()
 
 
 class DocumentConsumeDelayMixin:

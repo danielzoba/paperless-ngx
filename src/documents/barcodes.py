@@ -63,7 +63,10 @@ class BarcodeReader:
 
     def __enter__(self):
         if self.supported_mime_type:
-            self.temp_dir = tempfile.TemporaryDirectory(prefix="paperless-barcodes")
+            self.temp_dir = tempfile.TemporaryDirectory(
+                prefix="ngx-barcodes",
+                dir=settings.SCRATCH_DIR,
+            )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

@@ -130,25 +130,16 @@ def consume_file(
                     logger.info(f"Found ASN in barcode: {overrides.asn}")
 
     # continue with consumption if no barcode was found
-    document = Consumer().try_consume_file(
-        input_doc.original_file,
-        override_filename=overrides.filename,
-        override_title=overrides.title,
-        override_correspondent_id=overrides.correspondent_id,
-        override_document_type_id=overrides.document_type_id,
-        override_tag_ids=overrides.tag_ids,
-        override_created=overrides.created,
-        override_asn=overrides.asn,
-        override_owner_id=overrides.owner_id,
-    )
+    with Consumer(input_doc, overrides) as consumer:
+        document = consumer.try_consume_file()
 
-    if document:
-        return f"Success. New document id {document.pk} created"
-    else:
-        raise ConsumerError(
-            "Unknown error: Returned document was null, but "
-            "no error message was given.",
-        )
+        if document:
+            return f"Success. New document id {document.pk} created"
+        else:
+            raise ConsumerError(
+                "Unknown error: Returned document was null, but "
+                "no error message was given.",
+            )
 
 
 @shared_task

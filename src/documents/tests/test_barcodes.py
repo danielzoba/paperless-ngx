@@ -13,6 +13,7 @@ from documents.consumer import ConsumerError
 from documents.data_models import ConsumableDocument
 from documents.data_models import DocumentSource
 from documents.models import Document
+from documents.tests.utils import ConsumerProgressMixin
 from documents.tests.utils import DirectoriesMixin
 from documents.tests.utils import FileSystemAssertsMixin
 
@@ -555,7 +556,8 @@ class TestBarcode(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
         CONSUMER_BARCODE_TIFF_SUPPORT=True,
     )
     @mock.patch("documents.consumer.Consumer.try_consume_file")
-    def test_consume_barcode_unsupported_jpg_file(self, m):
+    @mock.patch("documents.consumer.get_channel_layer")
+    def test_consume_barcode_unsupported_jpg_file(self, try_consume_mock, _):
         """
         GIVEN:
             - JPEG image as input
@@ -588,14 +590,7 @@ class TestBarcode(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
                 "WARNING:paperless.barcodes:Unsupported file format for barcode reader: image/jpeg",
             ],
         )
-        m.assert_called_once()
-
-        args, kwargs = m.call_args
-        self.assertIsNone(kwargs["override_filename"])
-        self.assertIsNone(kwargs["override_title"])
-        self.assertIsNone(kwargs["override_correspondent_id"])
-        self.assertIsNone(kwargs["override_document_type_id"])
-        self.assertIsNone(kwargs["override_tag_ids"])
+        try_consume_mock.assert_called_once()
 
     @override_settings(
         CONSUMER_ENABLE_BARCODES=True,
@@ -722,7 +717,7 @@ class TestBarcode(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
             self.assertEqual(len(document_list), 5)
 
 
-class TestAsnBarcode(DirectoriesMixin, TestCase):
+class TestAsnBarcode(DirectoriesMixin, ConsumerProgressMixin, TestCase):
     SAMPLE_DIR = Path(__file__).parent / "samples"
 
     BARCODE_SAMPLE_DIR = SAMPLE_DIR / "barcodes"
@@ -864,18 +859,15 @@ class TestAsnBarcode(DirectoriesMixin, TestCase):
         dst = settings.SCRATCH_DIR / "barcode-39-asn-123.pdf"
         shutil.copy(test_file, dst)
 
-        with mock.patch("documents.consumer.Consumer.try_consume_file") as mocked_call:
-            tasks.consume_file(
-                ConsumableDocument(
-                    source=DocumentSource.ConsumeFolder,
-                    original_file=dst,
-                ),
-                None,
-            )
-
-            args, kwargs = mocked_call.call_args
-
-            self.assertEqual(kwargs["override_asn"], 123)
+        tasks.consume_file(
+            ConsumableDocument(
+                source=DocumentSource.ConsumeFolder,
+                original_file=dst,
+            ),
+            None,
+        )
+        doc = Document.objects.get()
+        self.assertEqual(doc.archive_serial_number, 123)
 
     @override_settings(CONSUMER_ENABLE_ASN_BARCODE=True)
     def test_asn_too_large(self):

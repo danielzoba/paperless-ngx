@@ -11,11 +11,11 @@ from documents.signals.handlers import before_task_publish_handler
 from documents.signals.handlers import task_failure_handler
 from documents.signals.handlers import task_postrun_handler
 from documents.signals.handlers import task_prerun_handler
-from documents.tests.test_consumer import fake_magic_from_file
 from documents.tests.utils import DirectoriesMixin
+from documents.tests.utils import fake_magic_from_file
 
 
-@mock.patch("documents.consumer.magic.from_file", fake_magic_from_file)
+@mock.patch("documents.data_models.magic.from_file", fake_magic_from_file)
 class TestTaskSignalHandler(DirectoriesMixin, TestCase):
     def util_call_before_task_publish_handler(self, headers_to_use, body_to_use):
         """
