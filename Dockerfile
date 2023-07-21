@@ -37,7 +37,7 @@ RUN set -eux \
 # Purpose: Installs s6-overlay and rootfs
 # Comments:
 #  - Don't leave anything extra in here either
-FROM python:3.9-slim-bullseye as s6-overlay-base
+FROM docker.io/python:3.9-slim-bookworm as s6-overlay-base
 
 WORKDIR /usr/src/s6
 
@@ -54,8 +54,8 @@ ARG TARGETVARIANT
 ARG S6_OVERLAY_VERSION=3.1.5.0
 
 # Lock these are well to prevent rebuilds as much as possible
-ARG S6_BUILD_TIME_PKGS="curl=7.74.0-1.3+deb11u7\
-                        xz-utils=5.2.5-2.1~deb11u1"
+ARG S6_BUILD_TIME_PKGS="curl=7.88.1-10\
+                        xz-utils=5.4.1-0.2"
 
 RUN set -eux \
     && echo "Installing build time packages" \
