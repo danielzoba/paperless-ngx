@@ -215,7 +215,7 @@ class MailDocumentParser(DocumentParser):
                         file_multi_part[2],
                     )
 
-                response = httpx.post(url_merge, files=pdf_collection, timeout=30.0)
+                response = httpx.post(url_merge, files=pdf_collection, timeout=300.0)
                 response.raise_for_status()  # ensure we notice bad responses
 
                 archive_path.write_bytes(response.content)
@@ -330,7 +330,7 @@ class MailDocumentParser(DocumentParser):
                     files=files,
                     headers=headers,
                     data=data,
-                    timeout=30.0,
+                    timeout=300.0,
                 )
                 response.raise_for_status()  # ensure we notice bad responses
             except Exception as err:
@@ -409,7 +409,7 @@ class MailDocumentParser(DocumentParser):
                     file_multi_part[2],
                 )
 
-            response = httpx.post(url, files=files, data=data, timeout=30.0)
+            response = httpx.post(url, files=files, data=data, timeout=300.0)
             response.raise_for_status()  # ensure we notice bad responses
         except Exception as err:
             raise ParseError(f"Error while converting document to PDF: {err}") from err
