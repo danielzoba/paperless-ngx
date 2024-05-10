@@ -111,18 +111,10 @@ RUN set -eux \
     && apt-get update \
     && apt-get install --yes --quiet --no-install-recommends ${RUNTIME_PACKAGES}
 
-COPY prebuilt/*.deb /
-RUN set -eux \
-    echo "Installing pre-built updates" \
-      && dpkg --auto-deconfigure -i apt_*.deb libapt-pkg6.0t64_*.deb libgnutls30t64_*.deb \
-      && dpkg --auto-deconfigure -i libqpdf29t64_*.deb qpdf_*.deb \
-      && dpkg -i libgs10-common_*.deb \
-      && dpkg -i libgs10_*.deb \
-      && dpkg -i ghostscript_*.deb \
-      && dpkg -i libjbig2enc0t64_*.deb \
-      && dpkg -i jbig2_*.deb \
-      && rm /*.deb
-      
+RUN mv /etc/apt/sources.list.d/debian.sources / \
+    && echo "deb https://deb.debian.org/debian trixie main contrib" > /etc/apt/sources.list \
+    && apt update && apt -y install apt qpdf ghostscript jbig2 curl postgresql-client tesseract-ocr unpaper
+  
 RUN set -eux \
     rm --recursive --force --verbose /var/lib/apt/lists/* \
   && echo "Installing supervisor" \
