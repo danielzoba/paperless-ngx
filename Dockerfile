@@ -109,38 +109,22 @@ ARG RUNTIME_PACKAGES="\
 RUN set -eux \
   echo "Installing system packages" \
     && apt-get update \
-    && apt-get install --yes --quiet --no-install-recommends ${RUNTIME_PACKAGES} \
-    && echo "Installing pre-built updates" \
-      && echo "Installing qpdf ${QPDF_VERSION}" \
-        && curl --fail --silent --show-error --location \
-          --output libqpdf29_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/qpdf-${QPDF_VERSION}/libqpdf29_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-        && curl --fail --silent --show-error --location \
-          --output qpdf_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/qpdf-${QPDF_VERSION}/qpdf_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-        && dpkg --install ./libqpdf29_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-        && dpkg --install ./qpdf_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-      && echo "Installing Ghostscript ${GS_VERSION}" \
-        && curl --fail --silent --show-error --location \
-          --output libgs10_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-        && curl --fail --silent --show-error --location \
-          --output ghostscript_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/ghostscript_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-        && curl --fail --silent --show-error --location \
-          --output libgs10-common_${GS_VERSION}.dfsg-2_all.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10-common_${GS_VERSION}.dfsg-2_all.deb \
-        && dpkg --install ./libgs10-common_${GS_VERSION}.dfsg-2_all.deb \
-        && dpkg --install ./libgs10_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-        && dpkg --install ./ghostscript_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-      && echo "Installing jbig2enc" \
-        && curl --fail --silent --show-error --location \
-          --output jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/jbig2enc-${JBIG2ENC_VERSION}/jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
-        && dpkg --install ./jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
-      && echo "Cleaning up image layer" \
-        && rm --force --verbose *.deb \
-    && rm --recursive --force --verbose /var/lib/apt/lists/* \
+    && apt-get install --yes --quiet --no-install-recommends ${RUNTIME_PACKAGES}
+
+RUN set -eux \
+    echo "Installing pre-built updates" \
+      && copy prebuilt/*.deb / \
+      && dpkg -i libqpdf29t64_*.deb \
+      && dpkg -i qpdf_*.deb \
+      && dpkg -i libgs10-common_*.deb \
+      && dpkg -i libgs10_*.deb \
+      && dpkg -i ghostscript_*.deb \
+      && dpkg -i libjbig2enc0t64_*.deb \
+      && dpkg -i jbig2_*.deb \
+      && rm /*.deb
+      
+RUN set -eux \
+    rm --recursive --force --verbose /var/lib/apt/lists/* \
   && echo "Installing supervisor" \
     && python3 -m pip install --default-timeout=1000 --upgrade --no-cache-dir supervisor==4.2.5
 
