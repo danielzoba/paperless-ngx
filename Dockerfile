@@ -1,4 +1,4 @@
-FROM arm32v7/alpine:3.7
+FROM arm32v6/alpine:3.7
 
 LABEL maintainer="The Paperless Project https://github.com/danielquinn/paperless" \
       contributors="Guy Addadi <addadi@gmail.com>, Pit Kleyersburg <pitkley@googlemail.com>, \
