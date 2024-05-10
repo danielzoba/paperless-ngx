@@ -67,14 +67,14 @@ you installed paperless-ngx in the first place. The releases are
 available at the [release
 page](https://github.com/paperless-ngx/paperless-ngx/releases).
 
-First of all, ensure that paperless is stopped.
+First of all, make sure no active processes (like consumption) are running, then [make a backup](#backup).
+
+After that, ensure that paperless is stopped:
 
 ```shell-session
 $ cd /path/to/paperless
 $ docker compose down
 ```
-
-After that, [make a backup](#backup).
 
 1.  If you pull the image from the docker hub, all you need to do is:
 
@@ -349,10 +349,16 @@ When you use the provided docker compose script, put the export inside
 the `export` folder in your paperless source directory. Specify
 `../export` as the `source`.
 
+Note that .zip files (as can be generated from the exporter) are not supported.
+
 !!! note
 
     Importing from a previous version of Paperless may work, but for best
     results it is suggested to match the versions.
+
+!!! warning
+
+    The importer should be run against a completely empty installation (database and directories) of Paperless-ngx.
 
 ### Document retagger {#retagger}
 
@@ -607,3 +613,10 @@ document_fuzzy_match [--ratio] [--processes N]
 | ----------- | -------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | --ratio     | No       | 85.0                | a number between 0 and 100, setting how similar a document must be for it to be reported. Higher numbers mean more similarity. |
 | --processes | No       | 1/4 of system cores | Number of processes to use for matching. Setting 1 disables multiple processes                                                 |
+| --delete    | No       | False               | If provided, one document of a matched pair above the ratio will be deleted.                                                   |
+
+!!! warning
+
+    If providing the `--delete` option, it is highly recommended to have a backup.
+    While every effort has been taken to ensure proper operation, there is always the
+    chance of deletion of a file you want to keep.

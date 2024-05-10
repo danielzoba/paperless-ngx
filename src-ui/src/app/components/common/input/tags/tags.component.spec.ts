@@ -1,21 +1,16 @@
-import {
-  ComponentFixture,
-  TestBed,
-  fakeAsync,
-  tick,
-} from '@angular/core/testing'
+import { ComponentFixture, TestBed } from '@angular/core/testing'
 import {
   FormsModule,
   ReactiveFormsModule,
   NG_VALUE_ACCESSOR,
 } from '@angular/forms'
 import { TagsComponent } from './tags.component'
-import { PaperlessTag } from 'src/app/data/paperless-tag'
+import { Tag } from 'src/app/data/tag'
 import {
   DEFAULT_MATCHING_ALGORITHM,
   MATCH_ALL,
 } from 'src/app/data/matching-model'
-import { NgSelectComponent, NgSelectModule } from '@ng-select/ng-select'
+import { NgSelectModule } from '@ng-select/ng-select'
 import { RouterTestingModule } from '@angular/router/testing'
 import { HttpClientTestingModule } from '@angular/common/http/testing'
 import { of } from 'rxjs'
@@ -35,8 +30,9 @@ import { ColorComponent } from '../color/color.component'
 import { PermissionsFormComponent } from '../permissions/permissions-form/permissions-form.component'
 import { SelectComponent } from '../select/select.component'
 import { SettingsService } from 'src/app/services/settings.service'
+import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 
-const tags: PaperlessTag[] = [
+const tags: Tag[] = [
   {
     id: 1,
     name: 'Tag1',
@@ -104,6 +100,7 @@ describe('TagsComponent', () => {
         NgbModalModule,
         NgbAccordionModule,
         NgbPopoverModule,
+        NgxBootstrapIconsModule.pick(allIcons),
       ],
     }).compileComponents()
 
@@ -171,5 +168,13 @@ describe('TagsComponent', () => {
     component.tags = tags
     expect(component.getTag(2)).toEqual(tags[1])
     expect(component.getTag(4)).toBeUndefined()
+  })
+
+  it('should emit filtered documents', () => {
+    component.value = [10]
+    component.tags = tags
+    const emitSpy = jest.spyOn(component.filterDocuments, 'emit')
+    component.onFilterDocuments()
+    expect(emitSpy).toHaveBeenCalledWith([tags[2]])
   })
 })

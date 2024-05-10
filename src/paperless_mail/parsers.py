@@ -69,6 +69,11 @@ class MailDocumentParser(DocumentParser):
 
         for key, value in mail.headers.items():
             value = ", ".join(i for i in value)
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as e:  # pragma: no cover
+                self.log.debug(f"Skipping header {key}: {e}")
+                continue
 
             result.append(
                 {
@@ -405,3 +410,9 @@ class MailDocumentParser(DocumentParser):
         html_pdf = tempdir / "html.pdf"
         html_pdf.write_bytes(response.content)
         return html_pdf
+
+    def get_settings(self):
+        """
+        This parser does not implement additional settings yet
+        """
+        return None

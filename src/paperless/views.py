@@ -1,23 +1,30 @@
 import os
 from collections import OrderedDict
 
+from allauth.socialaccount.adapter import get_adapter
+from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
 from django.db.models.functions import Lower
 from django.http import HttpResponse
+from django.http import HttpResponseBadRequest
 from django.views.generic import View
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.authtoken.models import Token
 from rest_framework.filters import OrderingFilter
 from rest_framework.generics import GenericAPIView
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import DjangoModelPermissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
 
 from documents.permissions import PaperlessObjectPermissions
 from paperless.filters import GroupFilterSet
 from paperless.filters import UserFilterSet
+from paperless.models import ApplicationConfiguration
+from paperless.serialisers import ApplicationConfigurationSerializer
 from paperless.serialisers import GroupSerializer
 from paperless.serialisers import ProfileSerializer
 from paperless.serialisers import UserSerializer
@@ -54,11 +61,7 @@ class StandardPagination(PageNumberPagination):
                     except Exception:
                         pass
         else:
-            for obj in self.page.paginator.object_list:
-                if hasattr(obj, "id"):
-                    ids.append(obj.id)
-                elif hasattr(obj, "fields"):
-                    ids.append(obj.fields()["id"])
+            ids = self.page.paginator.object_list.values_list("pk", flat=True)
         return ids
 
     def get_paginated_response_schema(self, schema):
@@ -71,7 +74,7 @@ class StandardPagination(PageNumberPagination):
 
 
 class FaviconView(View):
-    def get(self, request, *args, **kwargs):  # pragma: nocover
+    def get(self, request, *args, **kwargs):  # pragma: no cover
         favicon = os.path.join(
             os.path.dirname(__file__),
             "static",
@@ -160,3 +163,63 @@ class GenerateAuthTokenView(GenericAPIView):
         return Response(
             token.key,
         )
+
+
+class ApplicationConfigurationViewSet(ModelViewSet):
+    model = ApplicationConfiguration
+
+    queryset = ApplicationConfiguration.objects
+
+    serializer_class = ApplicationConfigurationSerializer
+    permission_classes = (IsAuthenticated, DjangoModelPermissions)
+
+
+class DisconnectSocialAccountView(GenericAPIView):
+    """
+    Disconnects a social account provider from the user account
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        user = self.request.user
+
+        try:
+            account = user.socialaccount_set.get(pk=request.data["id"])
+            account_id = account.id
+            account.delete()
+            return Response(account_id)
+        except SocialAccount.DoesNotExist:
+            return HttpResponseBadRequest("Social account not found")
+
+
+class SocialAccountProvidersView(APIView):
+    """
+    List of social account providers
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        adapter = get_adapter()
+        providers = adapter.list_providers(request)
+        resp = [
+            {"name": p.name, "login_url": p.get_login_url(request, process="connect")}
+            for p in providers
+            if p.id != "openid"
+        ]
+
+        for openid_provider in filter(lambda p: p.id == "openid", providers):
+            resp += [
+                {
+                    "name": b["name"],
+                    "login_url": openid_provider.get_login_url(
+                        request,
+                        process="connect",
+                        openid=b["openid_url"],
+                    ),
+                }
+                for b in openid_provider.get_brands()
+            ]
+
+        return Response(sorted(resp, key=lambda p: p["name"]))

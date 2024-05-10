@@ -131,6 +131,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
     def test_api_sufficient_permissions(self):
         user = User.objects.create_user(username="test")
         user.user_permissions.add(*Permission.objects.all())
+        user.is_staff = True
         self.client.force_authenticate(user)
 
         Document.objects.create(title="Test")
@@ -408,10 +409,17 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             checksum="3",
             owner=user2,
         )
+        doc4 = Document.objects.create(
+            title="Test4",
+            content="content 4",
+            checksum="4",
+            owner=user1,
+        )
 
         assign_perm("view_document", user1, doc2)
         assign_perm("view_document", user1, doc3)
         assign_perm("change_document", user1, doc3)
+        assign_perm("view_document", user2, doc4)
 
         self.client.force_authenticate(user1)
 
@@ -426,9 +434,11 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
 
         self.assertNotIn("permissions", resp_data["results"][0])
         self.assertIn("user_can_change", resp_data["results"][0])
-        self.assertEqual(resp_data["results"][0]["user_can_change"], True)  # doc1
-        self.assertEqual(resp_data["results"][1]["user_can_change"], False)  # doc2
-        self.assertEqual(resp_data["results"][2]["user_can_change"], True)  # doc3
+        self.assertTrue(resp_data["results"][0]["user_can_change"])  # doc1
+        self.assertFalse(resp_data["results"][0]["is_shared_by_requester"])  # doc1
+        self.assertFalse(resp_data["results"][1]["user_can_change"])  # doc2
+        self.assertTrue(resp_data["results"][2]["user_can_change"])  # doc3
+        self.assertTrue(resp_data["results"][3]["is_shared_by_requester"])  # doc4
 
         response = self.client.get(
             "/api/documents/?full_perms=true",
@@ -441,6 +451,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
 
         self.assertIn("permissions", resp_data["results"][0])
         self.assertNotIn("user_can_change", resp_data["results"][0])
+        self.assertNotIn("is_shared_by_requester", resp_data["results"][0])
 
 
 class TestApiUser(DirectoriesMixin, APITestCase):
@@ -690,8 +701,8 @@ class TestBulkEditObjectPermissions(APITestCase):
     def setUp(self):
         super().setUp()
 
-        user = User.objects.create_superuser(username="temp_admin")
-        self.client.force_authenticate(user=user)
+        self.temp_admin = User.objects.create_superuser(username="temp_admin")
+        self.client.force_authenticate(user=self.temp_admin)
 
         self.t1 = Tag.objects.create(name="t1")
         self.t2 = Tag.objects.create(name="t2")
@@ -707,7 +718,7 @@ class TestBulkEditObjectPermissions(APITestCase):
         GIVEN:
             - Existing objects
         WHEN:
-            - bulk_edit_object_perms API endpoint is called
+            - bulk_edit_objects API endpoint is called with set_permissions operation
         THEN:
             - Permissions and / or owner are changed
         """
@@ -723,11 +734,12 @@ class TestBulkEditObjectPermissions(APITestCase):
         }
 
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.t1.id, self.t2.id],
                     "object_type": "tags",
+                    "operation": "set_permissions",
                     "permissions": permissions,
                 },
             ),
@@ -738,11 +750,12 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertIn(self.user1, get_users_with_perms(self.t1))
 
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.c1.id],
                     "object_type": "correspondents",
+                    "operation": "set_permissions",
                     "permissions": permissions,
                 },
             ),
@@ -753,11 +766,12 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertIn(self.user1, get_users_with_perms(self.c1))
 
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.dt1.id],
                     "object_type": "document_types",
+                    "operation": "set_permissions",
                     "permissions": permissions,
                 },
             ),
@@ -768,11 +782,12 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertIn(self.user1, get_users_with_perms(self.dt1))
 
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.sp1.id],
                     "object_type": "storage_paths",
+                    "operation": "set_permissions",
                     "permissions": permissions,
                 },
             ),
@@ -783,11 +798,12 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertIn(self.user1, get_users_with_perms(self.sp1))
 
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.t1.id, self.t2.id],
                     "object_type": "tags",
+                    "operation": "set_permissions",
                     "owner": self.user3.id,
                 },
             ),
@@ -798,11 +814,12 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertEqual(Tag.objects.get(pk=self.t2.id).owner, self.user3)
 
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.sp1.id],
                     "object_type": "storage_paths",
+                    "operation": "set_permissions",
                     "owner": self.user3.id,
                 },
             ),
@@ -812,12 +829,87 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(StoragePath.objects.get(pk=self.sp1.id).owner, self.user3)
 
+    def test_bulk_object_set_permissions_merge(self):
+        """
+        GIVEN:
+            - Existing objects
+        WHEN:
+            - bulk_edit_objects API endpoint is called with set_permissions operation with merge=True or merge=False (default)
+        THEN:
+            - Permissions and / or owner are replaced or merged, depending on the merge flag
+        """
+        permissions = {
+            "view": {
+                "users": [self.user1.id, self.user2.id],
+                "groups": [],
+            },
+            "change": {
+                "users": [self.user1.id],
+                "groups": [],
+            },
+        }
+
+        assign_perm("view_tag", self.user3, self.t1)
+        self.t1.owner = self.user3
+        self.t1.save()
+
+        # merge=True
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id, self.t2.id],
+                    "object_type": "tags",
+                    "owner": self.user1.id,
+                    "permissions": permissions,
+                    "operation": "set_permissions",
+                    "merge": True,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.t1.refresh_from_db()
+        self.t2.refresh_from_db()
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # user3 should still be owner of t1 since was set prior
+        self.assertEqual(self.t1.owner, self.user3)
+        # user1 should now be owner of t2 since it didn't have an owner
+        self.assertEqual(self.t2.owner, self.user1)
+
+        # user1 should be added
+        self.assertIn(self.user1, get_users_with_perms(self.t1))
+        # user3 should be preserved
+        self.assertIn(self.user3, get_users_with_perms(self.t1))
+
+        # merge=False (default)
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id, self.t2.id],
+                    "object_type": "tags",
+                    "permissions": permissions,
+                    "operation": "set_permissions",
+                    "merge": False,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # user1 should be added
+        self.assertIn(self.user1, get_users_with_perms(self.t1))
+        # user3 should be removed
+        self.assertNotIn(self.user3, get_users_with_perms(self.t1))
+
     def test_bulk_edit_object_permissions_insufficient_perms(self):
         """
         GIVEN:
             - Objects owned by user other than logged in user
         WHEN:
-            - bulk_edit_object_perms API endpoint is called
+            - bulk_edit_objects API endpoint is called with set_permissions operation
         THEN:
             - User is not able to change permissions
         """
@@ -826,11 +918,12 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.client.force_authenticate(user=self.user1)
 
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.t1.id, self.t2.id],
                     "object_type": "tags",
+                    "operation": "set_permissions",
                     "owner": self.user1.id,
                 },
             ),
@@ -845,17 +938,18 @@ class TestBulkEditObjectPermissions(APITestCase):
         GIVEN:
             - Existing objects
         WHEN:
-            - bulk_edit_object_perms API endpoint is called with invalid params
+            - bulk_edit_objects API endpoint is called with set_permissions operation with invalid params
         THEN:
             - Validation fails
         """
         # not a list
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": self.t1.id,
                     "object_type": "tags",
+                    "operation": "set_permissions",
                     "owner": self.user1.id,
                 },
             ),
@@ -866,7 +960,7 @@ class TestBulkEditObjectPermissions(APITestCase):
 
         # not a list of ints
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": ["one"],
@@ -881,11 +975,12 @@ class TestBulkEditObjectPermissions(APITestCase):
 
         # duplicates
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [self.t1.id, self.t2.id, self.t1.id],
                     "object_type": "tags",
+                    "operation": "set_permissions",
                     "owner": self.user1.id,
                 },
             ),
@@ -896,11 +991,12 @@ class TestBulkEditObjectPermissions(APITestCase):
 
         # not a valid object type
         response = self.client.post(
-            "/api/bulk_edit_object_perms/",
+            "/api/bulk_edit_objects/",
             json.dumps(
                 {
                     "objects": [1],
                     "object_type": "madeup",
+                    "operation": "set_permissions",
                     "owner": self.user1.id,
                 },
             ),

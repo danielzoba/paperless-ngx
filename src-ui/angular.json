@@ -31,6 +31,7 @@
           "fr-FR": "src/locale/messages.fr_FR.xlf",
           "hu-HU": "src/locale/messages.hu_HU.xlf",
           "it-IT": "src/locale/messages.it_IT.xlf",
+          "ja-JP": "src/locale/messages.ja_JP.xlf",
           "lb-LU": "src/locale/messages.lb_LU.xlf",
           "nl-NL": "src/locale/messages.nl_NL.xlf",
           "no-NO": "src/locale/messages.no_NO.xlf",
@@ -76,7 +77,9 @@
             "scripts": [],
             "allowedCommonJsDependencies": [
               "pdfjs-dist",
-              "pdfjs-dist/web/pdf_viewer"
+              "pdfjs-dist/web/pdf_viewer",
+              "filesize",
+              "file-saver"
             ],
             "vendorChunk": true,
             "extractLicenses": false,
@@ -125,18 +128,18 @@
         "serve": {
           "builder": "@angular-devkit/build-angular:dev-server",
           "options": {
-            "browserTarget": "paperless-ui:build:en-US"
+            "buildTarget": "paperless-ui:build:en-US"
           },
           "configurations": {
             "production": {
-              "browserTarget": "paperless-ui:build:production"
+              "buildTarget": "paperless-ui:build:production"
             }
           }
         },
         "extract-i18n": {
           "builder": "@angular-devkit/build-angular:extract-i18n",
           "options": {
-            "browserTarget": "paperless-ui:build"
+            "buildTarget": "paperless-ui:build"
           }
         },
         "test": {

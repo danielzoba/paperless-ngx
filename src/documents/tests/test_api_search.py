@@ -4,6 +4,7 @@ from unittest import mock
 
 import pytest
 from dateutil.relativedelta import relativedelta
+from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
 from django.test import override_settings
@@ -20,9 +21,13 @@ from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import DocumentType
 from documents.models import Note
+from documents.models import SavedView
 from documents.models import StoragePath
 from documents.models import Tag
+from documents.models import Workflow
 from documents.tests.utils import DirectoriesMixin
+from paperless_mail.models import MailAccount
+from paperless_mail.models import MailRule
 
 
 class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
@@ -55,7 +60,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         with AsyncWriter(index.open_index()) as writer:
             # Note to future self: there is a reason we dont use a model signal handler to update the index: some operations edit many documents at once
             # (retagger, renamer) and we don't want to open a writer for each of these, but rather perform the entire operation with one writer.
-            # That's why we cant open the writer in a model on_save handler or something.
+            # That's why we can't open the writer in a model on_save handler or something.
             index.update_document(writer, d1)
             index.update_document(writer, d2)
             index.update_document(writer, d3)
@@ -595,6 +600,28 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data, [])
 
+    def test_search_autocomplete_search_term(self):
+        """
+        GIVEN:
+            - Search results for autocomplete include the exact search term
+        WHEN:
+            - API request for autocomplete
+        THEN:
+            - The search term is returned first in the autocomplete results
+        """
+        d1 = Document.objects.create(
+            title="doc1",
+            content="automobile automatic autobots automobile auto",
+            checksum="1",
+        )
+
+        with AsyncWriter(index.open_index()) as writer:
+            index.update_document(writer, d1)
+
+        response = self.client.get("/api/search/autocomplete/?term=auto")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data[0], b"auto")
+
     @pytest.mark.skip(reason="Not implemented yet")
     def test_search_spelling_correction(self):
         with AsyncWriter(index.open_index()) as writer:
@@ -898,13 +925,41 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             ),
         )
 
+        self.assertIn(
+            d4.id,
+            search_query(
+                "&has_custom_fields=1",
+            ),
+        )
+
+        self.assertIn(
+            d4.id,
+            search_query(
+                "&custom_fields__id__in=" + str(cf1.id),
+            ),
+        )
+
+        self.assertIn(
+            d4.id,
+            search_query(
+                "&custom_fields__id__all=" + str(cf1.id),
+            ),
+        )
+
+        self.assertNotIn(
+            d4.id,
+            search_query(
+                "&custom_fields__id__none=" + str(cf1.id),
+            ),
+        )
+
     def test_search_filtering_respect_owner(self):
         """
         GIVEN:
             - Documents with owners set & without
         WHEN:
-            - API reuqest for advanced query (search) is made by non-superuser
-            - API reuqest for advanced query (search) is made by superuser
+            - API request for advanced query (search) is made by non-superuser
+            - API request for advanced query (search) is made by superuser
         THEN:
             - Only owned docs are returned for regular users
             - All docs are returned for superuser
@@ -959,7 +1014,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         GIVEN:
             - Documents with granted view permissions to others
         WHEN:
-            - API reuqest for advanced query (search) is made by user
+            - API request for advanced query (search) is made by user
         THEN:
             - Only docs with granted view permissions are returned
         """
@@ -968,7 +1023,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         u1.user_permissions.add(*Permission.objects.filter(codename="view_document"))
         u2.user_permissions.add(*Permission.objects.filter(codename="view_document"))
 
-        Document.objects.create(checksum="1", content="test 1", owner=u1)
+        d1 = Document.objects.create(checksum="1", content="test 1", owner=u1)
         d2 = Document.objects.create(checksum="2", content="test 2", owner=u2)
         d3 = Document.objects.create(checksum="3", content="test 3", owner=u2)
         Document.objects.create(checksum="4", content="test 4")
@@ -993,9 +1048,10 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
 
         assign_perm("view_document", u1, d2)
         assign_perm("view_document", u1, d3)
+        assign_perm("view_document", u2, d1)
 
         with AsyncWriter(index.open_index()) as writer:
-            for doc in [d2, d3]:
+            for doc in [d1, d2, d3]:
                 index.update_document(writer, doc)
 
         self.client.force_authenticate(user=u1)
@@ -1010,6 +1066,8 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         r = self.client.get(f"/api/documents/?query=test&owner__id__in={u1.id}")
         self.assertEqual(r.data["count"], 1)
         r = self.client.get("/api/documents/?query=test&owner__isnull=true")
+        self.assertEqual(r.data["count"], 1)
+        r = self.client.get(f"/api/documents/?query=test&shared_by__id={u1.id}")
         self.assertEqual(r.data["count"], 1)
 
     def test_search_sorting(self):
@@ -1100,3 +1158,110 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             search_query("&ordering=-owner"),
             [d3.id, d2.id, d1.id],
         )
+
+    def test_global_search(self):
+        """
+        GIVEN:
+            - Multiple documents and objects
+        WHEN:
+            - Global search query is made
+        THEN:
+            - Appropriately filtered results are returned
+        """
+        d1 = Document.objects.create(
+            title="invoice doc1",
+            content="the thing i bought at a shop and paid with bank account",
+            checksum="A",
+            pk=1,
+        )
+        d2 = Document.objects.create(
+            title="bank statement doc2",
+            content="things i paid for in august",
+            checksum="B",
+            pk=2,
+        )
+        d3 = Document.objects.create(
+            title="tax bill doc3",
+            content="no b word",
+            checksum="C",
+            pk=3,
+        )
+
+        with index.open_index_writer() as writer:
+            index.update_document(writer, d1)
+            index.update_document(writer, d2)
+            index.update_document(writer, d3)
+
+        correspondent1 = Correspondent.objects.create(name="bank correspondent 1")
+        Correspondent.objects.create(name="correspondent 2")
+        document_type1 = DocumentType.objects.create(name="bank invoice")
+        DocumentType.objects.create(name="invoice")
+        storage_path1 = StoragePath.objects.create(name="bank path 1", path="path1")
+        StoragePath.objects.create(name="path 2", path="path2")
+        tag1 = Tag.objects.create(name="bank tag1")
+        Tag.objects.create(name="tag2")
+        user1 = User.objects.create_superuser("bank user1")
+        User.objects.create_user("user2")
+        group1 = Group.objects.create(name="bank group1")
+        Group.objects.create(name="group2")
+        SavedView.objects.create(
+            name="bank view",
+            show_on_dashboard=True,
+            show_in_sidebar=True,
+            sort_field="",
+            owner=user1,
+        )
+        mail_account1 = MailAccount.objects.create(name="bank mail account 1")
+        mail_account2 = MailAccount.objects.create(name="mail account 2")
+        mail_rule1 = MailRule.objects.create(
+            name="bank mail rule 1",
+            account=mail_account1,
+            action=MailRule.MailAction.MOVE,
+        )
+        MailRule.objects.create(
+            name="mail rule 2",
+            account=mail_account2,
+            action=MailRule.MailAction.MOVE,
+        )
+        custom_field1 = CustomField.objects.create(
+            name="bank custom field 1",
+            data_type=CustomField.FieldDataType.STRING,
+        )
+        CustomField.objects.create(
+            name="custom field 2",
+            data_type=CustomField.FieldDataType.INT,
+        )
+        workflow1 = Workflow.objects.create(name="bank workflow 1")
+        Workflow.objects.create(name="workflow 2")
+
+        self.client.force_authenticate(user1)
+
+        response = self.client.get("/api/search/?query=bank")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data
+        self.assertEqual(len(results["documents"]), 2)
+        self.assertEqual(len(results["saved_views"]), 1)
+        self.assertNotEqual(results["documents"][0]["id"], d3.id)
+        self.assertNotEqual(results["documents"][1]["id"], d3.id)
+        self.assertEqual(results["correspondents"][0]["id"], correspondent1.id)
+        self.assertEqual(results["document_types"][0]["id"], document_type1.id)
+        self.assertEqual(results["storage_paths"][0]["id"], storage_path1.id)
+        self.assertEqual(results["tags"][0]["id"], tag1.id)
+        self.assertEqual(results["users"][0]["id"], user1.id)
+        self.assertEqual(results["groups"][0]["id"], group1.id)
+        self.assertEqual(results["mail_accounts"][0]["id"], mail_account1.id)
+        self.assertEqual(results["mail_rules"][0]["id"], mail_rule1.id)
+        self.assertEqual(results["custom_fields"][0]["id"], custom_field1.id)
+        self.assertEqual(results["workflows"][0]["id"], workflow1.id)
+
+    def test_global_search_bad_request(self):
+        """
+        WHEN:
+            - Global search query is made without or with query < 3 characters
+        THEN:
+            - Error is returned
+        """
+        response = self.client.get("/api/search/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        response = self.client.get("/api/search/?query=no")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

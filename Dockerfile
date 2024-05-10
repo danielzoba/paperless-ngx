@@ -12,7 +12,7 @@ COPY ./src-ui /src/src-ui
 WORKDIR /src/src-ui
 RUN set -eux \
   && npm update npm -g \
-  && npm ci --omit=optional
+  && npm ci
 RUN set -eux \
   && ./node_modules/.bin/ng build --configuration production
 
@@ -29,7 +29,7 @@ COPY Pipfile* ./
 
 RUN set -eux \
   && echo "Installing pipenv" \
-    && python3 -m pip install --no-cache-dir --upgrade pipenv==2023.10.24 \
+    && python3 -m pip install --no-cache-dir --upgrade pipenv==2023.12.1 \
   && echo "Generating requirement.txt" \
     && pipenv requirements > requirements.txt
 
@@ -52,8 +52,15 @@ ARG TARGETARCH
 
 # Can be workflow provided, defaults set for manual building
 ARG JBIG2ENC_VERSION=0.29
-ARG QPDF_VERSION=11.6.3
-ARG GS_VERSION=10.02.0
+ARG QPDF_VERSION=11.9.0
+ARG GS_VERSION=10.02.1
+
+# Set Python environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    # Ignore warning from Whitenoise
+    PYTHONWARNINGS="ignore:::django.http.response:517" \
+    PNGX_CONTAINERIZED=1
 
 #
 # Begin installation and configuration
@@ -123,13 +130,13 @@ RUN set -eux \
       && echo "Installing Ghostscript ${GS_VERSION}" \
         && curl --fail --silent --show-error --location \
           --output libgs10_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
+          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
         && curl --fail --silent --show-error --location \
           --output ghostscript_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/ghostscript_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
+          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/ghostscript_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
         && curl --fail --silent --show-error --location \
           --output libgs10-common_${GS_VERSION}.dfsg-2_all.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10-common_${GS_VERSION}.dfsg-2_all.deb \
+          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10-common_${GS_VERSION}.dfsg-1_all.deb \
         && dpkg --install ./libgs10-common_${GS_VERSION}.dfsg-2_all.deb \
         && dpkg --install ./libgs10_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
         && dpkg --install ./ghostscript_${GS_VERSION}.dfsg-2_${TARGETARCH}.deb \
@@ -187,7 +194,7 @@ RUN set -eux \
     && chmod 755 /usr/local/bin/paperless_cmd.sh \
     && mv flower-conditional.sh /usr/local/bin/flower-conditional.sh \
     && chmod 755 /usr/local/bin/flower-conditional.sh \
-  && echo "Installing managment commands" \
+  && echo "Installing management commands" \
     && chmod +x install_management_commands.sh \
     && ./install_management_commands.sh
 
@@ -268,3 +275,5 @@ ENTRYPOINT ["/sbin/docker-entrypoint.sh"]
 EXPOSE 8000
 
 CMD ["/usr/local/bin/paperless_cmd.sh"]
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 CMD [ "curl", "-fs", "-S", "--max-time", "2", "http://localhost:8000" ]

@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 import tqdm
 from django.conf import settings
@@ -21,9 +22,11 @@ from filelock import FileLock
 from guardian.models import GroupObjectPermission
 from guardian.models import UserObjectPermission
 
+if settings.AUDIT_LOG_ENABLED:
+    from auditlog.models import LogEntry
+
 from documents.file_handling import delete_empty_directories
 from documents.file_handling import generate_filename
-from documents.models import ConsumptionTemplate
 from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
@@ -35,12 +38,16 @@ from documents.models import SavedViewFilterRule
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.models import UiSettings
+from documents.models import Workflow
+from documents.models import WorkflowAction
+from documents.models import WorkflowTrigger
 from documents.settings import EXPORTER_ARCHIVE_NAME
 from documents.settings import EXPORTER_FILE_NAME
 from documents.settings import EXPORTER_THUMBNAIL_NAME
 from documents.utils import copy_file_with_basic_stats
 from paperless import version
 from paperless.db import GnuPG
+from paperless.models import ApplicationConfiguration
 from paperless_mail.models import MailAccount
 from paperless_mail.models import MailRule
 
@@ -169,16 +176,16 @@ class Command(BaseCommand):
         self.delete: bool = options["delete"]
         self.no_archive: bool = options["no_archive"]
         self.no_thumbnail: bool = options["no_thumbnail"]
-        zip_export: bool = options["zip"]
+        self.zip_export: bool = options["zip"]
 
         # If zipping, save the original target for later and
         # get a temporary directory for the target instead
         temp_dir = None
-        original_target = None
-        if zip_export:
-            original_target = self.target
+        self.original_target: Optional[Path] = None
+        if self.zip_export:
+            self.original_target = self.target
 
-            os.makedirs(settings.SCRATCH_DIR, exist_ok=True)
+            settings.SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
             temp_dir = tempfile.TemporaryDirectory(
                 dir=settings.SCRATCH_DIR,
                 prefix="paperless-export",
@@ -200,10 +207,10 @@ class Command(BaseCommand):
 
                 # We've written everything to the temporary directory in this case,
                 # now make an archive in the original target, with all files stored
-                if zip_export:
+                if self.zip_export:
                     shutil.make_archive(
                         os.path.join(
-                            original_target,
+                            self.original_target,
                             options["zip_name"],
                         ),
                         format="zip",
@@ -212,7 +219,7 @@ class Command(BaseCommand):
 
         finally:
             # Always cleanup the temporary directory, if one was created
-            if zip_export and temp_dir is not None:
+            if self.zip_export and temp_dir is not None:
                 temp_dir.cleanup()
 
     def dump(self, progress_bar_disable=False):
@@ -284,12 +291,29 @@ class Command(BaseCommand):
             )
 
             manifest += json.loads(
-                serializers.serialize("json", ConsumptionTemplate.objects.all()),
+                serializers.serialize("json", WorkflowTrigger.objects.all()),
+            )
+
+            manifest += json.loads(
+                serializers.serialize("json", WorkflowAction.objects.all()),
+            )
+
+            manifest += json.loads(
+                serializers.serialize("json", Workflow.objects.all()),
             )
 
             manifest += json.loads(
                 serializers.serialize("json", CustomField.objects.all()),
             )
+
+            manifest += json.loads(
+                serializers.serialize("json", ApplicationConfiguration.objects.all()),
+            )
+
+            if settings.AUDIT_LOG_ENABLED:
+                manifest += json.loads(
+                    serializers.serialize("json", LogEntry.objects.all()),
+                )
 
             # These are treated specially and included in the per-document manifest
             # if that setting is enabled.  Otherwise, they are just exported to the bulk
@@ -451,14 +475,21 @@ class Command(BaseCommand):
 
         if self.delete:
             # 5. Remove files which we did not explicitly export in this run
+            if not self.zip_export:
+                for f in self.files_in_export_dir:
+                    f.unlink()
 
-            for f in self.files_in_export_dir:
-                f.unlink()
-
-                delete_empty_directories(
-                    f.parent,
-                    self.target,
-                )
+                    delete_empty_directories(
+                        f.parent,
+                        self.target,
+                    )
+            else:
+                # 5. Remove anything in the original location (before moving the zip)
+                for item in self.original_target.glob("*"):
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
 
     def check_and_copy(self, source, source_checksum, target: Path):
         if target in self.files_in_export_dir:
