@@ -111,11 +111,11 @@ RUN set -eux \
     && apt-get update \
     && apt-get install --yes --quiet --no-install-recommends ${RUNTIME_PACKAGES}
 
+COPY prebuilt/*.deb /
 RUN set -eux \
     echo "Installing pre-built updates" \
-      && copy prebuilt/*.deb / \
-      && dpkg -i libqpdf29t64_*.deb \
-      && dpkg -i qpdf_*.deb \
+      && dpkg --auto-deconfigure -i apt_*.deb libapt-pkg6.0t64_*.deb libgnutls30t64_*.deb \
+      && dpkg --auto-deconfigure -i libqpdf29t64_*.deb qpdf_*.deb \
       && dpkg -i libgs10-common_*.deb \
       && dpkg -i libgs10_*.deb \
       && dpkg -i ghostscript_*.deb \
