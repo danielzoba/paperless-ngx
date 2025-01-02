@@ -1,11 +1,11 @@
 import { Pipe, PipeTransform } from '@angular/core'
-import { UserService } from '../services/rest/user.service'
+import { User } from '../data/user'
 import {
   PermissionAction,
   PermissionType,
   PermissionsService,
 } from '../services/permissions.service'
-import { User } from '../data/user'
+import { UserService } from '../services/rest/user.service'
 
 @Pipe({
   name: 'username',
@@ -29,7 +29,7 @@ export class UsernamePipe implements PipeTransform {
 
   transform(userID: number): string {
     return this.users
-      ? this.getName(this.users.find((u) => u.id === userID)) ?? ''
+      ? (this.getName(this.users.find((u) => u.id === userID)) ?? '')
       : $localize`Shared`
   }
 

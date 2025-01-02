@@ -1,12 +1,12 @@
-import { Injectable } from '@angular/core'
 import { HttpEventType } from '@angular/common/http'
+import { Injectable } from '@angular/core'
 import { FileSystemFileEntry, NgxFileDropEntry } from 'ngx-file-drop'
+import { Subscription } from 'rxjs'
 import {
   ConsumerStatusService,
   FileStatusPhase,
 } from './consumer-status.service'
 import { DocumentService } from './rest/document.service'
-import { Subscription } from 'rxjs'
 
 @Injectable({
   providedIn: 'root',
@@ -53,7 +53,7 @@ export class UploadDocumentsService {
             )
             status.message = $localize`Uploading...`
           } else if (event.type == HttpEventType.Response) {
-            status.taskId = event.body['task_id']
+            status.taskId = event.body['task_id'] ?? event.body.toString()
             status.message = $localize`Upload complete, waiting...`
             this.uploadSubscriptions[file.name]?.complete()
           }

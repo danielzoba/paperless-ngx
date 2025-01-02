@@ -1,10 +1,11 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 
-import { LogoComponent } from './logo.component'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
 import { By } from '@angular/platform-browser'
-import { HttpClientTestingModule } from '@angular/common/http/testing'
-import { SettingsService } from 'src/app/services/settings.service'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
+import { SettingsService } from 'src/app/services/settings.service'
+import { LogoComponent } from './logo.component'
 
 describe('LogoComponent', () => {
   let component: LogoComponent
@@ -13,8 +14,11 @@ describe('LogoComponent', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      declarations: [LogoComponent],
-      imports: [HttpClientTestingModule],
+      imports: [LogoComponent],
+      providers: [
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
     settingsService = TestBed.inject(SettingsService)
     fixture = TestBed.createComponent(LogoComponent)

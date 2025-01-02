@@ -1,16 +1,23 @@
-import { TestBed } from '@angular/core/testing'
-import { CustomDatePipe } from './custom-date.pipe'
-import { SettingsService } from '../services/settings.service'
-import { HttpClientTestingModule } from '@angular/common/http/testing'
 import { DatePipe } from '@angular/common'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
+import { TestBed } from '@angular/core/testing'
+import { SettingsService } from '../services/settings.service'
+import { CustomDatePipe } from './custom-date.pipe'
 
 describe('CustomDatePipe', () => {
   let datePipe: CustomDatePipe
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      providers: [CustomDatePipe, SettingsService, DatePipe],
-      imports: [HttpClientTestingModule],
+      imports: [],
+      providers: [
+        CustomDatePipe,
+        SettingsService,
+        DatePipe,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
 
     datePipe = TestBed.inject(CustomDatePipe)
@@ -32,10 +39,13 @@ describe('CustomDatePipe', () => {
     const now = new Date()
     const notNow = new Date(now)
     notNow.setDate(now.getDate() - 1)
-    expect(datePipe.transform(notNow, 'relative')).toEqual('1 day ago')
+    expect(datePipe.transform(notNow, 'relative')).toEqual('Yesterday')
     notNow.setDate(now.getDate())
     notNow.setMonth(now.getMonth() - 1)
-    expect(datePipe.transform(notNow, 'relative')).toEqual('1 month ago')
+    if (now.getMonth() === 0) {
+      notNow.setFullYear(now.getFullYear() - 1)
+    }
+    expect(datePipe.transform(notNow, 'relative')).toEqual('Last month')
     expect(datePipe.transform(now, 'relative')).toEqual('Just now')
   })
 })

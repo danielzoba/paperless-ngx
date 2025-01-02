@@ -1,17 +1,22 @@
+import {
+  HttpEventType,
+  HttpResponse,
+  provideHttpClient,
+  withInterceptorsFromDi,
+} from '@angular/common/http'
+import {
+  HttpTestingController,
+  provideHttpClientTesting,
+} from '@angular/common/http/testing'
 import { TestBed } from '@angular/core/testing'
+import WS from 'jest-websocket-mock'
+import { environment } from 'src/environments/environment'
 import {
   ConsumerStatusService,
   FILE_STATUS_MESSAGES,
   FileStatusPhase,
 } from './consumer-status.service'
-import {
-  HttpClientTestingModule,
-  HttpTestingController,
-} from '@angular/common/http/testing'
-import { environment } from 'src/environments/environment'
 import { DocumentService } from './rest/document.service'
-import { HttpEventType, HttpResponse } from '@angular/common/http'
-import WS from 'jest-websocket-mock'
 import { SettingsService } from './settings.service'
 
 describe('ConsumerStatusService', () => {
@@ -27,8 +32,14 @@ describe('ConsumerStatusService', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      providers: [ConsumerStatusService, DocumentService, SettingsService],
-      imports: [HttpClientTestingModule],
+      imports: [],
+      providers: [
+        ConsumerStatusService,
+        DocumentService,
+        SettingsService,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
 
     httpTestingController = TestBed.inject(HttpTestingController)

@@ -1,25 +1,20 @@
+import { Clipboard } from '@angular/cdk/clipboard'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
 import {
   ComponentFixture,
   TestBed,
   fakeAsync,
   tick,
 } from '@angular/core/testing'
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
+import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import {
-  NgbActiveModal,
-  NgbModalModule,
-  NgbPopoverModule,
-  NgbProgressbarModule,
-} from '@ng-bootstrap/ng-bootstrap'
-import { Clipboard, ClipboardModule } from '@angular/cdk/clipboard'
-import { SystemStatusDialogComponent } from './system-status-dialog.component'
-import {
-  SystemStatusItemStatus,
   InstallType,
   SystemStatus,
+  SystemStatusItemStatus,
 } from 'src/app/data/system-status'
-import { HttpClientTestingModule } from '@angular/common/http/testing'
-import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
-import { NgxFilesizeModule } from 'ngx-filesize'
+import { SystemStatusDialogComponent } from './system-status-dialog.component'
 
 const status: SystemStatus = {
   pngx_version: '2.4.3',
@@ -57,16 +52,14 @@ describe('SystemStatusDialogComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      declarations: [SystemStatusDialogComponent],
-      providers: [NgbActiveModal],
       imports: [
-        NgbModalModule,
-        ClipboardModule,
-        HttpClientTestingModule,
+        SystemStatusDialogComponent,
         NgxBootstrapIconsModule.pick(allIcons),
-        NgxFilesizeModule,
-        NgbPopoverModule,
-        NgbProgressbarModule,
+      ],
+      providers: [
+        NgbActiveModal,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
       ],
     }).compileComponents()
 
@@ -87,7 +80,7 @@ describe('SystemStatusDialogComponent', () => {
     jest.spyOn(clipboard, 'copy')
     component.copy()
     expect(clipboard.copy).toHaveBeenCalledWith(
-      JSON.stringify(component.status)
+      JSON.stringify(component.status, null, 4)
     )
     expect(component.copied).toBeTruthy()
     tick(3000)

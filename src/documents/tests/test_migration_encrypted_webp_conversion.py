@@ -1,10 +1,9 @@
 import importlib
 import shutil
 import tempfile
+from collections.abc import Callable
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Callable
-from typing import Union
 from unittest import mock
 
 from django.test import override_settings
@@ -23,7 +22,9 @@ migration_1037_obj = importlib.import_module(
 )
 @mock.patch(f"{__name__}.migration_1037_obj.run_convert")
 class TestMigrateToEncrytpedWebPThumbnails(TestMigrations):
-    migrate_from = "1036_alter_savedviewfilterrule_rule_type"
+    migrate_from = (
+        "1022_paperlesstask_squashed_1036_alter_savedviewfilterrule_rule_type"
+    )
     migrate_to = "1037_webp_encrypted_thumbnail_conversion"
     auto_migrate = False
 
@@ -113,7 +114,7 @@ class TestMigrateToEncrytpedWebPThumbnails(TestMigrations):
     def assert_file_count_by_extension(
         self,
         ext: str,
-        dir: Union[str, Path],
+        dir: str | Path,
         expected_count: int,
     ):
         """

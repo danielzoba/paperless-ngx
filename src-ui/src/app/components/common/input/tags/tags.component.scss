@@ -7,10 +7,6 @@
   font-size: 1rem;
 }
 
-.tag-wrap-delete {
-  cursor: pointer;
-}
-
 .paperless-input-select.disabled {
   .input-group {
       cursor: not-allowed;
@@ -20,7 +16,7 @@
       pointer-events: none;
 
       .ng-select-container {
-          background-color: var(--pngx-bg-alt) !important;
+          background-color: var(--pngx-bg-disabled) !important;
       }
   }
 }

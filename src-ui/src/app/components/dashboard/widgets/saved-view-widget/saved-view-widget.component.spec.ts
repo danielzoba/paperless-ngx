@@ -1,16 +1,24 @@
+import { DragDropModule } from '@angular/cdk/drag-drop'
 import { DatePipe } from '@angular/common'
-import { HttpClientTestingModule } from '@angular/common/http/testing'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
 import {
   ComponentFixture,
   TestBed,
   fakeAsync,
   tick,
 } from '@angular/core/testing'
+import { By } from '@angular/platform-browser'
 import { Router } from '@angular/router'
 import { RouterTestingModule } from '@angular/router/testing'
 import { NgbModule } from '@ng-bootstrap/ng-bootstrap'
-import { of, Subject } from 'rxjs'
+import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
+import { Subject, of } from 'rxjs'
 import { routes } from 'src/app/app-routing.module'
+import { CustomFieldDisplayComponent } from 'src/app/components/common/custom-field-display/custom-field-display.component'
+import { PreviewPopupComponent } from 'src/app/components/common/preview-popup/preview-popup.component'
+import { CustomFieldDataType } from 'src/app/data/custom-field'
+import { DisplayField, DisplayMode } from 'src/app/data/document'
 import {
   FILTER_CORRESPONDENT,
   FILTER_DOCUMENT_TYPE,
@@ -23,24 +31,17 @@ import { IfPermissionsDirective } from 'src/app/directives/if-permissions.direct
 import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
+import { SafeUrlPipe } from 'src/app/pipes/safeurl.pipe'
 import {
   ConsumerStatusService,
   FileStatus,
 } from 'src/app/services/consumer-status.service'
 import { DocumentListViewService } from 'src/app/services/document-list-view.service'
 import { PermissionsService } from 'src/app/services/permissions.service'
+import { CustomFieldsService } from 'src/app/services/rest/custom-fields.service'
 import { DocumentService } from 'src/app/services/rest/document.service'
 import { WidgetFrameComponent } from '../widget-frame/widget-frame.component'
 import { SavedViewWidgetComponent } from './saved-view-widget.component'
-import { By } from '@angular/platform-browser'
-import { SafeUrlPipe } from 'src/app/pipes/safeurl.pipe'
-import { DragDropModule } from '@angular/cdk/drag-drop'
-import { PreviewPopupComponent } from 'src/app/components/common/preview-popup/preview-popup.component'
-import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
-import { CustomFieldsService } from 'src/app/services/rest/custom-fields.service'
-import { CustomFieldDataType } from 'src/app/data/custom-field'
-import { CustomFieldDisplayComponent } from 'src/app/components/common/custom-field-display/custom-field-display.component'
-import { DisplayMode, DisplayField } from 'src/app/data/document'
 
 const savedView: SavedView = {
   id: 1,
@@ -64,6 +65,7 @@ const savedView: SavedView = {
     DisplayField.CORRESPONDENT,
     DisplayField.DOCUMENT_TYPE,
     DisplayField.STORAGE_PATH,
+    DisplayField.PAGE_COUNT,
     `${DisplayField.CUSTOM_FIELD}11` as any,
     `${DisplayField.CUSTOM_FIELD}15` as any,
   ],
@@ -115,7 +117,11 @@ describe('SavedViewWidgetComponent', () => {
 
   beforeEach(async () => {
     TestBed.configureTestingModule({
-      declarations: [
+      imports: [
+        NgbModule,
+        RouterTestingModule.withRoutes(routes),
+        DragDropModule,
+        NgxBootstrapIconsModule.pick(allIcons),
         SavedViewWidgetComponent,
         WidgetFrameComponent,
         IfPermissionsDirective,
@@ -163,13 +169,8 @@ describe('SavedViewWidgetComponent', () => {
               }),
           },
         },
-      ],
-      imports: [
-        HttpClientTestingModule,
-        NgbModule,
-        RouterTestingModule.withRoutes(routes),
-        DragDropModule,
-        NgxBootstrapIconsModule.pick(allIcons),
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
       ],
     }).compileComponents()
 
@@ -184,7 +185,7 @@ describe('SavedViewWidgetComponent', () => {
     fixture.detectChanges()
   })
 
-  it('should show a list of documents', () => {
+  it('should show a list of documents', fakeAsync(() => {
     jest.spyOn(documentService, 'listFiltered').mockReturnValue(
       of({
         all: [2, 3],
@@ -193,43 +194,17 @@ describe('SavedViewWidgetComponent', () => {
       })
     )
     component.ngOnInit()
+    tick(500)
     fixture.detectChanges()
     expect(fixture.debugElement.nativeElement.textContent).toContain('doc2')
     expect(fixture.debugElement.nativeElement.textContent).toContain('doc3')
     // preview + download buttons
     expect(
       fixture.debugElement.queryAll(By.css('td a.btn'))[0].attributes['href']
-    ).toEqual(component.getPreviewUrl(documentResults[0]))
+    ).toEqual(documentService.getPreviewUrl(documentResults[0].id))
     expect(
       fixture.debugElement.queryAll(By.css('td a.btn'))[1].attributes['href']
     ).toEqual(component.getDownloadUrl(documentResults[0]))
-  })
-
-  it('should show preview on mouseover after delay to preload content', fakeAsync(() => {
-    jest.spyOn(documentService, 'listFiltered').mockReturnValue(
-      of({
-        all: [2, 3],
-        count: 2,
-        results: documentResults,
-      })
-    )
-    component.ngOnInit()
-    fixture.detectChanges()
-    component.mouseEnterPreviewButton(documentResults[0])
-    expect(component.popover.isOpen()).toBeTruthy()
-    expect(component.popoverHidden).toBeTruthy()
-    tick(600)
-    expect(component.popoverHidden).toBeFalsy()
-    component.maybeClosePopover()
-
-    component.mouseEnterPreviewButton(documentResults[1])
-    tick(100)
-    component.mouseLeavePreviewButton()
-    component.mouseEnterPreview()
-    expect(component.popover.isOpen()).toBeTruthy()
-    component.mouseLeavePreview()
-    tick(600)
-    expect(component.popover.isOpen()).toBeFalsy()
   }))
 
   it('should call api endpoint and load results', () => {
@@ -342,6 +317,7 @@ describe('SavedViewWidgetComponent', () => {
     expect(component.getColumnTitle(DisplayField.STORAGE_PATH)).toEqual(
       'Storage path'
     )
+    expect(component.getColumnTitle(DisplayField.PAGE_COUNT)).toEqual('Pages')
   })
 
   it('should get correct column title for custom field', () => {

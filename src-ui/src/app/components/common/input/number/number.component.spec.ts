@@ -1,13 +1,14 @@
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 import {
   FormsModule,
   NG_VALUE_ACCESSOR,
   ReactiveFormsModule,
 } from '@angular/forms'
-import { NumberComponent } from './number.component'
-import { DocumentService } from 'src/app/services/rest/document.service'
-import { HttpClientTestingModule } from '@angular/common/http/testing'
 import { of } from 'rxjs'
+import { DocumentService } from 'src/app/services/rest/document.service'
+import { NumberComponent } from './number.component'
 
 describe('NumberComponent', () => {
   let component: NumberComponent
@@ -17,9 +18,12 @@ describe('NumberComponent', () => {
 
   beforeEach(async () => {
     TestBed.configureTestingModule({
-      declarations: [NumberComponent],
-      providers: [DocumentService],
-      imports: [FormsModule, ReactiveFormsModule, HttpClientTestingModule],
+      imports: [FormsModule, ReactiveFormsModule, NumberComponent],
+      providers: [
+        DocumentService,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     }).compileComponents()
 
     fixture = TestBed.createComponent(NumberComponent)

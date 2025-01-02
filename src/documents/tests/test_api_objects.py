@@ -1,8 +1,10 @@
+import datetime
 import json
 from unittest import mock
 
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -88,6 +90,57 @@ class TestApiObjects(DirectoriesMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         results = response.data["results"]
         self.assertEqual(len(results), 2)
+
+    def test_correspondent_last_correspondence(self):
+        """
+        GIVEN:
+            - Correspondent with documents
+        WHEN:
+            - API is called
+        THEN:
+            - Last correspondence date is returned only if requested for list, and for detail
+        """
+
+        Document.objects.create(
+            mime_type="application/pdf",
+            correspondent=self.c1,
+            created=timezone.make_aware(datetime.datetime(2022, 1, 1)),
+            checksum="123",
+        )
+        Document.objects.create(
+            mime_type="application/pdf",
+            correspondent=self.c1,
+            created=timezone.make_aware(datetime.datetime(2022, 1, 2)),
+            checksum="456",
+        )
+
+        # Only if requested for list
+        response = self.client.get(
+            "/api/correspondents/",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        self.assertNotIn("last_correspondence", results[0])
+
+        response = self.client.get(
+            "/api/correspondents/?last_correspondence=true",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        self.assertIn(
+            "2022-01-02",
+            results[0]["last_correspondence"],
+        )
+
+        # Included in detail by default
+        response = self.client.get(
+            f"/api/correspondents/{self.c1.id}/",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(
+            "2022-01-02",
+            response.data["last_correspondence"],
+        )
 
 
 class TestApiStoragePaths(DirectoriesMixin, APITestCase):
@@ -186,7 +239,7 @@ class TestApiStoragePaths(DirectoriesMixin, APITestCase):
                     "/{created_year_short}/{created_month}/{created_month_name}"
                     "/{created_month_name_short}/{created_day}/{added}/{added_year}"
                     "/{added_year_short}/{added_month}/{added_month_name}"
-                    "/{added_month_name_short}/{added_day}/{asn}/{tags}"
+                    "/{added_month_name_short}/{added_day}/{asn}"
                     "/{tag_list}/{owner_username}/{original_name}/{doc_pk}/",
                 },
             ),
@@ -252,6 +305,35 @@ class TestApiStoragePaths(DirectoriesMixin, APITestCase):
 
         # only called once
         bulk_update_mock.assert_called_once_with([document.pk])
+
+    def test_test_storage_path(self):
+        """
+        GIVEN:
+            - API request to test a storage path
+        WHEN:
+            - API is called
+        THEN:
+            - Correct HTTP response
+            - Correct response data
+        """
+        document = Document.objects.create(
+            mime_type="application/pdf",
+            storage_path=self.sp1,
+            title="Something",
+            checksum="123",
+        )
+        response = self.client.post(
+            f"{self.ENDPOINT}test/",
+            json.dumps(
+                {
+                    "document": document.id,
+                    "path": "path/{{ title }}",
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, "path/Something")
 
 
 class TestBulkEditObjects(APITestCase):

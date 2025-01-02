@@ -1,8 +1,12 @@
 import { Component, HostListener, ViewChild } from '@angular/core'
-import { NgxFileDropComponent, NgxFileDropEntry } from 'ngx-file-drop'
 import {
-  PermissionsService,
+  NgxFileDropComponent,
+  NgxFileDropEntry,
+  NgxFileDropModule,
+} from 'ngx-file-drop'
+import {
   PermissionAction,
+  PermissionsService,
   PermissionType,
 } from 'src/app/services/permissions.service'
 import { SettingsService } from 'src/app/services/settings.service'
@@ -13,6 +17,7 @@ import { UploadDocumentsService } from 'src/app/services/upload-documents.servic
   selector: 'pngx-file-drop',
   templateUrl: './file-drop.component.html',
   styleUrls: ['./file-drop.component.scss'],
+  imports: [NgxFileDropModule],
 })
 export class FileDropComponent {
   private fileLeaveTimeoutID: any
@@ -38,7 +43,7 @@ export class FileDropComponent {
 
   @ViewChild('ngxFileDrop') ngxFileDrop: NgxFileDropComponent
 
-  @HostListener('dragover', ['$event']) onDragOver(event: DragEvent) {
+  @HostListener('document:dragover', ['$event']) onDragOver(event: DragEvent) {
     if (!this.dragDropEnabled || !event.dataTransfer?.types?.includes('Files'))
       return
     event.preventDefault()
@@ -53,7 +58,7 @@ export class FileDropComponent {
     clearTimeout(this.fileLeaveTimeoutID)
   }
 
-  @HostListener('dragleave', ['$event']) public onDragLeave(
+  @HostListener('document:dragleave', ['$event']) public onDragLeave(
     event: DragEvent,
     immediate: boolean = false
   ) {
@@ -73,7 +78,7 @@ export class FileDropComponent {
     }, ms)
   }
 
-  @HostListener('drop', ['$event']) public onDrop(event: DragEvent) {
+  @HostListener('document:drop', ['$event']) public onDrop(event: DragEvent) {
     if (!this.dragDropEnabled) return
     event.preventDefault()
     event.stopImmediatePropagation()

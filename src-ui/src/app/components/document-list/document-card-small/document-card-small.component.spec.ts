@@ -1,30 +1,14 @@
 import { DatePipe } from '@angular/common'
-import { HttpClientTestingModule } from '@angular/common/http/testing'
-import {
-  ComponentFixture,
-  TestBed,
-  fakeAsync,
-  tick,
-} from '@angular/core/testing'
-import { RouterTestingModule } from '@angular/router/testing'
-import {
-  NgbPopoverModule,
-  NgbTooltipModule,
-  NgbProgressbarModule,
-} from '@ng-bootstrap/ng-bootstrap'
-import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
-import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
-import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
-import { SafeUrlPipe } from 'src/app/pipes/safeurl.pipe'
-import { DocumentCardSmallComponent } from './document-card-small.component'
-import { of } from 'rxjs'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
+import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { By } from '@angular/platform-browser'
-import { TagComponent } from '../../common/tag/tag.component'
-import { Tag } from 'src/app/data/tag'
-import { IsNumberPipe } from 'src/app/pipes/is-number.pipe'
-import { PreviewPopupComponent } from '../../common/preview-popup/preview-popup.component'
+import { RouterTestingModule } from '@angular/router/testing'
 import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
-import { CustomFieldDisplayComponent } from '../../common/custom-field-display/custom-field-display.component'
+import { of } from 'rxjs'
+import { Tag } from 'src/app/data/tag'
+import { TagComponent } from '../../common/tag/tag.component'
+import { DocumentCardSmallComponent } from './document-card-small.component'
 
 const doc = {
   id: 10,
@@ -33,6 +17,7 @@ const doc = {
   correspondent: 8,
   document_type: 10,
   storage_path: null,
+  page_count: 12,
   notes: [
     {
       id: 11,
@@ -59,25 +44,15 @@ describe('DocumentCardSmallComponent', () => {
 
   beforeEach(async () => {
     TestBed.configureTestingModule({
-      declarations: [
-        DocumentCardSmallComponent,
-        DocumentTitlePipe,
-        CustomDatePipe,
-        IfPermissionsDirective,
-        SafeUrlPipe,
-        TagComponent,
-        IsNumberPipe,
-        PreviewPopupComponent,
-        CustomFieldDisplayComponent,
-      ],
-      providers: [DatePipe],
       imports: [
-        HttpClientTestingModule,
         RouterTestingModule,
-        NgbPopoverModule,
-        NgbTooltipModule,
-        NgbProgressbarModule,
         NgxBootstrapIconsModule.pick(allIcons),
+        DocumentCardSmallComponent,
+      ],
+      providers: [
+        DatePipe,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
       ],
     }).compileComponents()
 
@@ -85,6 +60,18 @@ describe('DocumentCardSmallComponent', () => {
     component = fixture.componentInstance
     component.document = Object.assign({}, doc)
     fixture.detectChanges()
+    jest.useFakeTimers()
+  })
+
+  it('should show the card', () => {
+    expect(component.show).toBeFalsy()
+    component.ngAfterViewInit()
+    jest.advanceTimersByTime(100)
+    expect(component.show).toBeTruthy()
+  })
+
+  it('should display page count', () => {
+    expect(fixture.nativeElement.textContent).toContain('12 pages')
   })
 
   it('should display a document, limit tags to 5', () => {
@@ -108,18 +95,11 @@ describe('DocumentCardSmallComponent', () => {
     ).toHaveLength(6)
   })
 
-  it('should show preview on mouseover after delay to preload content', fakeAsync(() => {
-    component.mouseEnterPreview()
-    expect(component.popover.isOpen()).toBeTruthy()
-    expect(component.popoverHidden).toBeTruthy()
-    tick(600)
-    expect(component.popoverHidden).toBeFalsy()
+  it('should try to close the preview on mouse leave', () => {
+    component.popupPreview = {
+      close: jest.fn(),
+    } as any
     component.mouseLeaveCard()
-
-    component.mouseEnterPreview()
-    tick(100)
-    component.mouseLeavePreview()
-    tick(600)
-    expect(component.popover.isOpen()).toBeFalsy()
-  }))
+    expect(component.popupPreview.close).toHaveBeenCalled()
+  })
 })

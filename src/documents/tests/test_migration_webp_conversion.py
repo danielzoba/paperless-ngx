@@ -1,10 +1,9 @@
 import importlib
 import shutil
 import tempfile
+from collections.abc import Callable
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Callable
-from typing import Union
 from unittest import mock
 
 from django.test import override_settings
@@ -22,7 +21,7 @@ migration_1021_obj = importlib.import_module(
 )
 @mock.patch(f"{__name__}.migration_1021_obj.run_convert")
 class TestMigrateWebPThumbnails(TestMigrations):
-    migrate_from = "1020_merge_20220518_1839"
+    migrate_from = "1016_auto_20210317_1351_squashed_1020_merge_20220518_1839"
     migrate_to = "1021_webp_thumbnail_conversion"
     auto_migrate = False
 
@@ -86,7 +85,7 @@ class TestMigrateWebPThumbnails(TestMigrations):
     def assert_file_count_by_extension(
         self,
         ext: str,
-        dir: Union[str, Path],
+        dir: str | Path,
         expected_count: int,
     ):
         """

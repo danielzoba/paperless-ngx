@@ -1,15 +1,15 @@
-import { TestBed } from '@angular/core/testing'
-import { OpenDocumentsService } from './open-documents.service'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import {
-  HttpClientTestingModule,
   HttpTestingController,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing'
-import { environment } from 'src/environments/environment'
-import { Subscription, throwError } from 'rxjs'
+import { TestBed } from '@angular/core/testing'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import { Subscription } from 'rxjs'
+import { environment } from 'src/environments/environment'
 import { ConfirmDialogComponent } from '../components/common/confirm-dialog/confirm-dialog.component'
 import { OPEN_DOCUMENT_SERVICE } from '../data/storage-keys'
-import { wind } from 'ngx-bootstrap-icons'
+import { OpenDocumentsService } from './open-documents.service'
 
 const documents = [
   {
@@ -56,9 +56,13 @@ describe('OpenDocumentsService', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      providers: [OpenDocumentsService, NgbModal],
-      imports: [HttpClientTestingModule],
-      declarations: [ConfirmDialogComponent],
+      imports: [ConfirmDialogComponent],
+      providers: [
+        OpenDocumentsService,
+        NgbModal,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
 
     sessionStorage.clear()

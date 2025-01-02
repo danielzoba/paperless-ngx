@@ -8,17 +8,17 @@ common [OCR](#ocr) related settings and some frontend settings. If set, these wi
 preference over the settings via environment variables. If not set, the environment setting
 or applicable default will be utilized instead.
 
-- If you run paperless on docker, `paperless.conf` is not used.
-  Rather, configure paperless by copying necessary options to
-  `docker-compose.env`.
+-   If you run paperless on docker, `paperless.conf` is not used.
+    Rather, configure paperless by copying necessary options to
+    `docker-compose.env`.
 
-- If you are running paperless on anything else, paperless will search
-  for the configuration file in these locations and use the first one
-  it finds:
-  - The environment variable `PAPERLESS_CONFIGURATION_PATH`
-  - `/path/to/paperless/paperless.conf`
-  - `/etc/paperless.conf`
-  - `/usr/local/etc/paperless.conf`
+-   If you are running paperless on anything else, paperless will search
+    for the configuration file in these locations and use the first one
+    it finds:
+    -   The environment variable `PAPERLESS_CONFIGURATION_PATH`
+    -   `/path/to/paperless/paperless.conf`
+    -   `/etc/paperless.conf`
+    -   `/usr/local/etc/paperless.conf`
 
 ## Required services
 
@@ -38,7 +38,7 @@ matcher.
         `redis://<username>:<password>@<host>:<port>/<DBIndex>`
 
     [More information on securing your Redis
-    Instance](https://redis.io/docs/getting-started/#securing-redis).
+    Instance](https://redis.io/docs/latest/operate/oss_and_stack/management/security).
 
     Defaults to `redis://localhost:6379`.
 
@@ -219,10 +219,10 @@ database, classification model, etc).
 
     Defaults to "../data/", relative to the "src" directory.
 
-#### [`PAPERLESS_TRASH_DIR=<path>`](#PAPERLESS_TRASH_DIR) {#PAPERLESS_TRASH_DIR}
+#### [`PAPERLESS_EMPTY_TRASH_DIR=<path>`](#PAPERLESS_EMPTY_TRASH_DIR) {#PAPERLESS_EMPTY_TRASH_DIR}
 
-: Instead of removing deleted documents, they are moved to this
-directory.
+: When documents are deleted (e.g. after emptying the trash) the original files will be moved here
+instead of being removed from the filesystem. Only the original version is kept.
 
     This must be writeable by the user running paperless. When running
     inside docker, ensure that this path is within a permanent volume
@@ -230,7 +230,9 @@ directory.
 
     Note that the directory must exist prior to using this setting.
 
-    Defaults to empty (i.e. really delete documents).
+    Defaults to empty (i.e. really delete files).
+
+    This setting was previously named PAPERLESS_TRASH_DIR.
 
 #### [`PAPERLESS_MEDIA_ROOT=<path>`](#PAPERLESS_MEDIA_ROOT) {#PAPERLESS_MEDIA_ROOT}
 
@@ -287,6 +289,12 @@ Unless you are using this in a bare metal install or other setup,
 this folder is no longer needed and can be removed manually.
 
 Defaults to `/usr/share/nltk_data`
+
+#### [`PAPERLESS_MODEL_FILE=<path>`](#PAPERLESS_MODEL_FILE) {#PAPERLESS_MODEL_FILE}
+
+: This is where paperless will store the classification model.
+
+    Defaults to `PAPERLESS_DATA_DIR/classification_model.pickle`.
 
 ## Logging
 
@@ -586,14 +594,31 @@ system. See the corresponding
 
 #### [`PAPERLESS_DISABLE_REGULAR_LOGIN=<bool>`](#PAPERLESS_DISABLE_REGULAR_LOGIN) {#PAPERLESS_DISABLE_REGULAR_LOGIN}
 
-: Disables the regular frontend username / password login, i.e. once you have setup SSO. Note that this setting does not disable the Django admin login. To prevent logins directly to Django, consider blocking `/admin/` in your [web server or reverse proxy configuration](https://github.com/paperless-ngx/paperless-ngx/wiki/Using-a-Reverse-Proxy-with-Paperless-ngx).
+: Disables the regular frontend username / password login, i.e. once you have setup SSO. Note that this setting does not disable the Django admin login nor logging in with local credentials via the API. To prevent access to the Django admin, consider blocking `/admin/` in your [web server or reverse proxy configuration](https://github.com/paperless-ngx/paperless-ngx/wiki/Using-a-Reverse-Proxy-with-Paperless-ngx).
+
+You can optionally also automatically redirect users to the SSO login with [PAPERLESS_REDIRECT_LOGIN_TO_SSO](#PAPERLESS_REDIRECT_LOGIN_TO_SSO)
+
+    Defaults to False
+
+#### [`PAPERLESS_REDIRECT_LOGIN_TO_SSO=<bool>`](#PAPERLESS_REDIRECT_LOGIN_TO_SSO) {#PAPERLESS_REDIRECT_LOGIN_TO_SSO}
+
+: When this setting is enabled users will automatically be redirected (using javascript) to the first SSO provider login. You may still want to disable the frontend login form for clarity.
 
     Defaults to False
 
 #### [`PAPERLESS_ACCOUNT_SESSION_REMEMBER=<bool>`](#PAPERLESS_ACCOUNT_SESSION_REMEMBER) {#PAPERLESS_ACCOUNT_SESSION_REMEMBER}
 
-: See the corresponding
+: If false, sessions will expire at browser close, if true will use `PAPERLESS_SESSION_COOKIE_AGE` for expiration. See the corresponding
 [django-allauth documentation](https://docs.allauth.org/en/latest/account/configuration.html)
+
+    Defaults to True
+
+#### [`PAPERLESS_SESSION_COOKIE_AGE=<int>`](#PAPERLESS_SESSION_COOKIE_AGE) {#PAPERLESS_SESSION_COOKIE_AGE}
+
+: Login session cookie expiration. Applies if `PAPERLESS_ACCOUNT_SESSION_REMEMBER` is enabled. See the corresponding
+[django documentation](https://docs.djangoproject.com/en/5.1/ref/settings/#std-setting-SESSION_COOKIE_AGE)
+
+    Defaults to 1209600 (2 weeks)
 
 ## OCR settings {#ocr}
 
@@ -615,6 +640,8 @@ parsing documents.
     in which case Tesseract will use whatever language matches best.
     Keep in mind that Tesseract uses much more CPU time with multiple
     languages enabled.
+
+    If you are including languages that are not installed by default, you will need to also set [`PAPERLESS_OCR_LANGUAGES`](configuration.md#PAPERLESS_OCR_LANGUAGES) for docker deployments or install the tesseract language packages manually for bare metal installations.
 
     Defaults to "eng".
 
@@ -1131,6 +1158,12 @@ within your documents.
     second, and year last order. Characters D, M, or Y can be shuffled
     to meet the required order.
 
+#### [`PAPERLESS_ENABLE_GPG_DECRYPTOR=<bool>`](#PAPERLESS_ENABLE_GPG_DECRYPTOR) {#PAPERLESS_ENABLE_GPG_DECRYPTOR}
+
+: Enable or disable the GPG decryptor for encrypted emails. See [GPG Decryptor](advanced_usage.md#gpg-decryptor) for more information.
+
+    Defaults to false.
+
 ### Polling {#polling}
 
 #### [`PAPERLESS_CONSUMER_POLLING=<num>`](#PAPERLESS_CONSUMER_POLLING) {#PAPERLESS_CONSUMER_POLLING}
@@ -1174,6 +1207,48 @@ consumers working on the same file. Configure this to prevent that.
 
     Defaults to 0.5 seconds.
 
+## Incoming Mail {#incoming_mail}
+
+### Email OAuth {#email_oauth}
+
+#### [`PAPERLESS_OAUTH_CALLBACK_BASE_URL=<str>`](#PAPERLESS_OAUTH_CALLBACK_BASE_URL) {#PAPERLESS_OAUTH_CALLBACK_BASE_URL}
+
+: The base URL for the OAuth callback. This is used to construct the full URL for the OAuth callback. This should be the URL that the Paperless instance is accessible at. If not set, defaults to the `PAPERLESS_URL` setting. At least one of these settings must be set to enable OAuth Email setup.
+
+    Defaults to none (thus will use [PAPERLESS_URL](#PAPERLESS_URL)).
+
+#### [`PAPERLESS_GMAIL_OAUTH_CLIENT_ID=<str>`](#PAPERLESS_GMAIL_OAUTH_CLIENT_ID) {#PAPERLESS_GMAIL_OAUTH_CLIENT_ID}
+
+: The OAuth client ID for Gmail. This is required for Gmail OAuth Email setup. See [OAuth Email Setup](usage.md#oauth-email-setup) for more information.
+
+    Defaults to none.
+
+#### [`PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET=<str>`](#PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET) {#PAPERLESS_GMAIL_OAUTH_CLIENT_SECRET}
+
+: The OAuth client secret for Gmail. This is required for Gmail OAuth Email setup. See [OAuth Email Setup](usage.md#oauth-email-setup) for more information.
+
+    Defaults to none.
+
+#### [`PAPERLESS_OUTLOOK_OAUTH_CLIENT_ID=<str>`](#PAPERLESS_OUTLOOK_OAUTH_CLIENT_ID) {#PAPERLESS_OUTLOOK_OAUTH_CLIENT_ID}
+
+: The OAuth client ID for Outlook. This is required for Outlook OAuth Email setup. See [OAuth Email Setup](usage.md#oauth-email-setup) for more information.
+
+    Defaults to none.
+
+#### [`PAPERLESS_OUTLOOK_OAUTH_CLIENT_SECRET=<str>`](#PAPERLESS_OUTLOOK_OAUTH_CLIENT_SECRET) {#PAPERLESS_OUTLOOK_OAUTH_CLIENT_SECRET}
+
+: The OAuth client secret for Outlook. This is required for Outlook OAuth Email setup. See [OAuth Email Setup](usage.md#oauth-email-setup) for more information.
+
+    Defaults to none.
+
+### Encrypted Emails {#encrypted_emails}
+
+#### [`PAPERLESS_EMAIL_GNUPG_HOME=<str>`](#PAPERLESS_EMAIL_GNUPG_HOME) {#PAPERLESS_EMAIL_GNUPG_HOME}
+
+: Optional, sets the `GNUPG_HOME` path to use with GPG decryptor for encrypted emails. See [GPG Decryptor](advanced_usage.md#gpg-decryptor) for more information. If not set, defaults to the default `GNUPG_HOME` path.
+
+    Defaults to <not set>.
+
 ## Barcodes {#barcodes}
 
 #### [`PAPERLESS_CONSUMER_ENABLE_BARCODES=<bool>`](#PAPERLESS_CONSUMER_ENABLE_BARCODES) {#PAPERLESS_CONSUMER_ENABLE_BARCODES}
@@ -1211,6 +1286,12 @@ paperless is used with the PATCH-T separator pages, users shouldn't
 change this.
 
     Defaults to "PATCHT"
+
+#### [`PAPERLESS_CONSUMER_BARCODE_RETAIN_SPLIT_PAGES=<bool>`](#PAPERLESS_CONSUMER_BARCODE_RETAIN_SPLIT_PAGES) {#PAPERLESS_CONSUMER_BARCODE_RETAIN_SPLIT_PAGES}
+
+: If set to true, all pages that are split by a barcode (such as PATCHT) will be kept.
+
+    Defaults to false.
 
 #### [`PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE=<bool>`](#PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE) {#PAPERLESS_CONSUMER_ENABLE_ASN_BARCODE}
 
@@ -1258,6 +1339,15 @@ fails a bigger dpi value i.e. 600 can fix the issue. Try using in
 combination with PAPERLESS_CONSUMER_BARCODE_UPSCALE bigger than 1.0.
 
     Defaults to "300"
+
+#### [`PAPERLESS_CONSUMER_BARCODE_MAX_PAGES=<int>`](#PAPERLESS_CONSUMER_BARCODE_MAX_PAGES) {#PAPERLESS_CONSUMER_BARCODE_MAX_PAGES}
+
+: Because barcode detection is a computationally-intensive operation, this setting
+limits the detection of barcodes to a number of first pages. If your scanner has
+a limit for the number of pages that can be scanned it would be sensible to set this
+as the limit here.
+
+    Defaults to "0", allowing all pages to be checked for barcodes.
 
 #### [`PAPERLESS_CONSUMER_ENABLE_TAG_BARCODE=<bool>`](#PAPERLESS_CONSUMER_ENABLE_TAG_BARCODE) {#PAPERLESS_CONSUMER_ENABLE_TAG_BARCODE}
 
@@ -1353,6 +1443,20 @@ processing. This only has an effect if
 `PAPERLESS_CONSUMER_ENABLE_COLLATE_DOUBLE_SIDED` has been enabled.
 
     Defaults to false.
+
+## Trash
+
+#### [`PAPERLESS_EMPTY_TRASH_DELAY=<num>`](#PAPERLESS_EMPTY_TRASH_DELAY) {#PAPERLESS_EMPTY_TRASH_DELAY}
+
+: Sets how long in days documents remain in the 'trash' before they are permanently deleted.
+
+    Defaults to 30 days, minimum of 1 day.
+
+#### [`PAPERLESS_EMPTY_TRASH_TASK_CRON=<cron expression>`](#PAPERLESS_EMPTY_TRASH_TASK_CRON) {#PAPERLESS_EMPTY_TRASH_TASK_CRON}
+
+: Configures the schedule to empty the trash of expired deleted documents.
+
+    Defaults to `0 1 * * *`, once per day.
 
 ## Binaries
 

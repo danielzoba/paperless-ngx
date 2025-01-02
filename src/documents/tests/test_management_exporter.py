@@ -3,10 +3,14 @@ import json
 import os
 import shutil
 import tempfile
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 from zipfile import ZipFile
 
+from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.models import SocialApp
+from allauth.socialaccount.models import SocialToken
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission
 from django.contrib.contenttypes.models import ContentType
@@ -37,10 +41,17 @@ from documents.sanity_checker import check_sanity
 from documents.settings import EXPORTER_FILE_NAME
 from documents.tests.utils import DirectoriesMixin
 from documents.tests.utils import FileSystemAssertsMixin
+from documents.tests.utils import SampleDirMixin
 from documents.tests.utils import paperless_environment
+from paperless_mail.models import MailAccount
 
 
-class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
+class TestExportImport(
+    DirectoriesMixin,
+    FileSystemAssertsMixin,
+    SampleDirMixin,
+    TestCase,
+):
     def setUp(self) -> None:
         self.target = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.target)
@@ -139,19 +150,24 @@ class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
     @override_settings(PASSPHRASE="test")
     def _do_export(
         self,
+        *,
         use_filename_format=False,
         compare_checksums=False,
+        compare_json=False,
         delete=False,
         no_archive=False,
         no_thumbnail=False,
         split_manifest=False,
         use_folder_prefix=False,
+        data_only=False,
     ):
         args = ["document_exporter", self.target]
         if use_filename_format:
             args += ["--use-filename-format"]
         if compare_checksums:
             args += ["--compare-checksums"]
+        if compare_json:
+            args += ["--compare-json"]
         if delete:
             args += ["--delete"]
         if no_archive:
@@ -162,6 +178,8 @@ class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
             args += ["--split-manifest"]
         if use_folder_prefix:
             args += ["--use-folder-prefix"]
+        if data_only:
+            args += ["--data-only"]
 
         call_command(*args)
 
@@ -325,6 +343,10 @@ class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
         self.assertNotEqual(st_mtime_1, st_mtime_2)
         self.assertNotEqual(st_mtime_2, st_mtime_3)
 
+        self._do_export(compare_json=True)
+        st_mtime_4 = os.stat(os.path.join(self.target, "manifest.json")).st_mtime
+        self.assertEqual(st_mtime_3, st_mtime_4)
+
     def test_update_export_changed_checksum(self):
         shutil.rmtree(os.path.join(self.dirs.media_dir, "documents"))
         shutil.copytree(
@@ -456,7 +478,7 @@ class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
         with ZipFile(expected_file) as zip:
             self.assertEqual(len(zip.namelist()), 11)
             self.assertIn("manifest.json", zip.namelist())
-            self.assertIn("version.json", zip.namelist())
+            self.assertIn("metadata.json", zip.namelist())
 
     @override_settings(PASSPHRASE="test")
     def test_export_zipped_format(self):
@@ -494,7 +516,7 @@ class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
             # Extras are from the directories, which also appear in the listing
             self.assertEqual(len(zip.namelist()), 14)
             self.assertIn("manifest.json", zip.namelist())
-            self.assertIn("version.json", zip.namelist())
+            self.assertIn("metadata.json", zip.namelist())
 
     @override_settings(PASSPHRASE="test")
     def test_export_zipped_with_delete(self):
@@ -542,7 +564,7 @@ class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
         with ZipFile(expected_file) as zip:
             self.assertEqual(len(zip.namelist()), 11)
             self.assertIn("manifest.json", zip.namelist())
-            self.assertIn("version.json", zip.namelist())
+            self.assertIn("metadata.json", zip.namelist())
 
     def test_export_target_not_exists(self):
         """
@@ -794,3 +816,191 @@ class TestExportImport(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
             manifest = self._do_export(use_filename_format=True)
             for obj in manifest:
                 self.assertNotEqual(obj["model"], "auditlog.logentry")
+
+    def test_export_data_only(self):
+        """
+        GIVEN:
+            - Request to export documents with data only
+        WHEN:
+            - Export command is called
+        THEN:
+            - No document files are exported
+            - Manifest and version are exported
+        """
+
+        shutil.rmtree(self.dirs.media_dir / "documents")
+        shutil.copytree(
+            self.SAMPLE_DIR / "documents",
+            self.dirs.media_dir / "documents",
+        )
+
+        _ = self._do_export(data_only=True)
+
+        # Manifest and version files only should be present in the exported directory
+        self.assertFileCountInDir(self.target, 2)
+        self.assertIsFile(self.target / "manifest.json")
+        self.assertIsFile(self.target / "metadata.json")
+
+        shutil.rmtree(self.dirs.media_dir / "documents")
+        Document.objects.all().delete()
+
+        call_command(
+            "document_importer",
+            "--no-progress-bar",
+            "--data-only",
+            self.target,
+        )
+
+        self.assertEqual(Document.objects.all().count(), 4)
+
+
+class TestCryptExportImport(
+    DirectoriesMixin,
+    FileSystemAssertsMixin,
+    TestCase,
+):
+    def setUp(self) -> None:
+        self.target = Path(tempfile.mkdtemp())
+        return super().setUp()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.target, ignore_errors=True)
+        return super().tearDown()
+
+    def test_export_passphrase(self):
+        """
+        GIVEN:
+            - A mail account exists
+        WHEN:
+            - Export command is called
+            - Passphrase is provided
+        THEN:
+            - Output password is not plaintext
+        """
+        MailAccount.objects.create(
+            name="Test Account",
+            imap_server="test.imap.com",
+            username="myusername",
+            password="mypassword",
+        )
+
+        app = SocialApp.objects.create(
+            provider="test",
+            name="test",
+            client_id="test",
+        )
+        account = SocialAccount.objects.create(
+            user=User.objects.first(),
+            provider="test",
+            uid="test",
+        )
+        SocialToken.objects.create(
+            app=app,
+            account=account,
+            token="test",
+            token_secret="test",
+        )
+
+        call_command(
+            "document_exporter",
+            "--no-progress-bar",
+            "--passphrase",
+            "securepassword",
+            self.target,
+        )
+
+        self.assertIsFile(self.target / "metadata.json")
+        self.assertIsFile(self.target / "manifest.json")
+
+        data = json.loads((self.target / "manifest.json").read_text())
+
+        mail_accounts = list(
+            filter(lambda r: r["model"] == "paperless_mail.mailaccount", data),
+        )
+
+        self.assertEqual(len(mail_accounts), 1)
+
+        mail_account_data = mail_accounts[0]
+
+        self.assertNotEqual(mail_account_data["fields"]["password"], "mypassword")
+
+        MailAccount.objects.all().delete()
+
+        call_command(
+            "document_importer",
+            "--no-progress-bar",
+            "--passphrase",
+            "securepassword",
+            self.target,
+        )
+
+        account = MailAccount.objects.first()
+
+        self.assertIsNotNone(account)
+        self.assertEqual(account.password, "mypassword")
+
+        social_token = SocialToken.objects.first()
+        self.assertIsNotNone(social_token)
+
+    def test_import_crypt_no_passphrase(self):
+        """
+        GIVEN:
+            - A mail account exists
+        WHEN:
+            - Export command is called
+            - Passphrase is provided
+            - Import command is called
+            - No passphrase is given
+        THEN:
+            - An error is raised for the issue
+        """
+        call_command(
+            "document_exporter",
+            "--no-progress-bar",
+            "--passphrase",
+            "securepassword",
+            self.target,
+        )
+
+        with self.assertRaises(CommandError) as err:
+            call_command(
+                "document_importer",
+                "--no-progress-bar",
+                self.target,
+            )
+            self.assertEqual(
+                err.msg,
+                "No passphrase was given, but this export contains encrypted fields",
+            )
+
+    def test_export_warn_plaintext(self):
+        """
+        GIVEN:
+            - A mail account exists
+        WHEN:
+            - Export command is called
+            - No passphrase is provided
+        THEN:
+            - Output password is plaintext
+            - Warning is output
+        """
+        MailAccount.objects.create(
+            name="Test Account",
+            imap_server="test.imap.com",
+            username="myusername",
+            password="mypassword",
+        )
+
+        stdout = StringIO()
+
+        call_command(
+            "document_exporter",
+            "--no-progress-bar",
+            str(self.target),
+            stdout=stdout,
+        )
+        stdout.seek(0)
+        self.assertIn(
+            ("No passphrase was given, sensitive fields will be in plaintext"),
+            stdout.read(),
+        )

@@ -1,12 +1,12 @@
-import { TestBed } from '@angular/core/testing'
-import { TasksService } from './tasks.service'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import {
-  HttpClientTestingModule,
   HttpTestingController,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing'
+import { TestBed } from '@angular/core/testing'
 import { environment } from 'src/environments/environment'
-import { PaperlessTaskType } from '../data/paperless-task'
-import { PaperlessTaskStatus } from '../data/paperless-task'
+import { PaperlessTaskStatus, PaperlessTaskType } from '../data/paperless-task'
+import { TasksService } from './tasks.service'
 
 describe('TasksService', () => {
   let httpTestingController: HttpTestingController
@@ -14,8 +14,12 @@ describe('TasksService', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      providers: [TasksService],
-      imports: [HttpClientTestingModule],
+      imports: [],
+      providers: [
+        TasksService,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
 
     httpTestingController = TestBed.inject(HttpTestingController)
@@ -34,10 +38,16 @@ describe('TasksService', () => {
     expect(req.request.method).toEqual('GET')
   })
 
+  it('does not call tasks api endpoint on reload if already loading', () => {
+    tasksService.loading = true
+    tasksService.reload()
+    httpTestingController.expectNone(`${environment.apiBaseUrl}tasks/`)
+  })
+
   it('calls acknowledge_tasks api endpoint on dismiss and reloads', () => {
     tasksService.dismissTasks(new Set([1, 2, 3]))
     const req = httpTestingController.expectOne(
-      `${environment.apiBaseUrl}acknowledge_tasks/`
+      `${environment.apiBaseUrl}tasks/acknowledge/`
     )
     expect(req.request.method).toEqual('POST')
     expect(req.request.body).toEqual({

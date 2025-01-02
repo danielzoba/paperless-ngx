@@ -5,6 +5,7 @@ import tempfile
 import uuid
 import zoneinfo
 from binascii import hexlify
+from datetime import date
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,7 @@ from django.conf import settings
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
 from django.core.cache import cache
+from django.db import DataError
 from django.test import override_settings
 from django.utils import timezone
 from guardian.shortcuts import assign_perm
@@ -366,6 +368,16 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             data_type=CustomField.FieldDataType.STRING,
         )
         self.client.force_login(user=self.user)
+
+        # Initial response should include only document's creation
+        response = self.client.get(f"/api/documents/{doc.pk}/history/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 1)
+
+        self.assertIsNone(response.data[0]["actor"])
+        self.assertEqual(response.data[0]["action"], "create")
+
         self.client.patch(
             f"/api/documents/{doc.pk}/",
             data={
@@ -379,12 +391,15 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             format="json",
         )
 
+        # Second response should include custom field addition
         response = self.client.get(f"/api/documents/{doc.pk}/history/")
+
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[1]["actor"]["id"], self.user.id)
-        self.assertEqual(response.data[1]["action"], "create")
+        self.assertEqual(len(response.data), 2)
+        self.assertEqual(response.data[0]["actor"]["id"], self.user.id)
+        self.assertEqual(response.data[0]["action"], "create")
         self.assertEqual(
-            response.data[1]["changes"],
+            response.data[0]["changes"],
             {
                 "custom_fields": {
                     "type": "custom_field",
@@ -393,6 +408,8 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
                 },
             },
         )
+        self.assertIsNone(response.data[1]["actor"])
+        self.assertEqual(response.data[1]["action"], "create")
 
     @override_settings(AUDIT_LOG_ENABLED=False)
     def test_document_history_action_disabled(self):
@@ -625,6 +642,41 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         results = response.data["results"]
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["id"], doc3.id)
+
+    def test_custom_field_select_filter(self):
+        """
+        GIVEN:
+            - Documents with select custom field values
+        WHEN:
+            - API request with custom field filtering is made
+        THEN:
+            - Only docs with selected custom field values are returned
+        """
+        doc1 = Document.objects.create(checksum="1", content="test 1")
+        Document.objects.create(checksum="2", content="test 2")
+        custom_field_select = CustomField.objects.create(
+            name="Test Custom Field Select",
+            data_type=CustomField.FieldDataType.SELECT,
+            extra_data={
+                "select_options": [
+                    {"label": "Option 1", "id": "abc123"},
+                    {"label": "Choice 2", "id": "def456"},
+                ],
+            },
+        )
+        CustomFieldInstance.objects.create(
+            document=doc1,
+            field=custom_field_select,
+            value_select="def456",
+        )
+
+        r = self.client.get("/api/documents/?custom_fields__icontains=choice")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["count"], 1)
+
+        r = self.client.get("/api/documents/?custom_fields__icontains=option")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["count"], 0)
 
     def test_document_checksum_filter(self):
         Document.objects.create(
@@ -907,7 +959,7 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["documents_total"], 3)
         self.assertEqual(response.data["documents_inbox"], 1)
-        self.assertEqual(response.data["inbox_tag"], tag_inbox.pk)
+        self.assertEqual(response.data["inbox_tags"], [tag_inbox.pk])
         self.assertEqual(
             response.data["document_file_type_counts"][0]["mime_type_count"],
             2,
@@ -928,7 +980,46 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         response = self.client.get("/api/statistics/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["documents_inbox"], None)
-        self.assertEqual(response.data["inbox_tag"], None)
+        self.assertEqual(response.data["inbox_tags"], None)
+
+    def test_statistics_multiple_users(self):
+        """
+        GIVEN:
+            - Inbox tags with different owners and documents that are accessible to different users
+        WHEN:
+            - Statistics are requested
+        THEN:
+            - Statistics only include inbox counts for tags accessible by the user
+        """
+        u1 = User.objects.create_user("user1")
+        u2 = User.objects.create_user("user2")
+        inbox_tag_u1 = Tag.objects.create(name="inbox_u1", is_inbox_tag=True, owner=u1)
+        Tag.objects.create(name="inbox_u2", is_inbox_tag=True, owner=u2)
+        doc_u1 = Document.objects.create(
+            title="none1",
+            checksum="A",
+            mime_type="application/pdf",
+            owner=u1,
+        )
+        doc2_u1 = Document.objects.create(
+            title="none2",
+            checksum="B",
+            mime_type="application/pdf",
+        )
+        doc_u1.tags.add(inbox_tag_u1)
+        doc2_u1.save()
+        doc2_u1.tags.add(inbox_tag_u1)
+        doc2_u1.save()
+
+        self.client.force_authenticate(user=u1)
+        response = self.client.get("/api/statistics/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["documents_inbox"], 2)
+
+        self.client.force_authenticate(user=u2)
+        response = self.client.get("/api/statistics/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["documents_inbox"], 0)
 
     def test_upload(self):
         self.consume_file_mock.return_value = celery.result.AsyncResult(
@@ -1315,6 +1406,27 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(input_doc.original_file.name, "simple.pdf")
         self.assertEqual(overrides.filename, "simple.pdf")
         self.assertEqual(overrides.custom_field_ids, [custom_field.id])
+
+    def test_upload_invalid_pdf(self):
+        """
+        GIVEN: Invalid PDF named "*.pdf" that mime_type is in settings.CONSUMER_PDF_RECOVERABLE_MIME_TYPES
+        WHEN: Upload the file
+        THEN: The file is not rejected
+        """
+        self.consume_file_mock.return_value = celery.result.AsyncResult(
+            id=str(uuid.uuid4()),
+        )
+
+        with open(
+            os.path.join(os.path.dirname(__file__), "samples", "invalid_pdf.pdf"),
+            "rb",
+        ) as f:
+            response = self.client.post(
+                "/api/documents/post_document/",
+                {"document": f},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_get_metadata(self):
         doc = Document.objects.create(
@@ -2432,6 +2544,50 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.content, b"1")
 
+    def test_asn_not_unique_with_trashed_doc(self):
+        """
+        GIVEN:
+            - Existing document with ASN that is trashed
+        WHEN:
+            - API request to update document with same ASN
+        THEN:
+            - Explicit error is returned
+        """
+        user1 = User.objects.create_superuser(username="test1")
+
+        self.client.force_authenticate(user1)
+
+        doc1 = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="this is a document 1",
+            checksum="1",
+            archive_serial_number=1,
+        )
+        doc1.delete()
+
+        doc2 = Document.objects.create(
+            title="test2",
+            mime_type="application/pdf",
+            content="this is a document 2",
+            checksum="2",
+        )
+        result = self.client.patch(
+            f"/api/documents/{doc2.pk}/",
+            {
+                "archive_serial_number": 1,
+            },
+        )
+        self.assertEqual(result.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            result.json(),
+            {
+                "archive_serial_number": [
+                    "Document with this Archive Serial Number already exists in the trash.",
+                ],
+            },
+        )
+
     def test_remove_inbox_tags(self):
         """
         GIVEN:
@@ -2497,6 +2653,35 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         doc1.refresh_from_db()
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(doc1.tags.count(), 2)
+
+    @mock.patch("django_softdelete.models.SoftDeleteModel.delete")
+    def test_warn_on_delete_with_old_uuid_field(self, mocked_delete):
+        """
+        GIVEN:
+            - Existing document in a (mocked) MariaDB database with an old UUID field
+        WHEN:
+            - API request to delete document is made which raises "Data too long for column" error
+        THEN:
+            - Warning is logged alerting the user of the issue (and link to the fix)
+        """
+
+        doc = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="this is a document 1",
+            checksum="1",
+        )
+
+        mocked_delete.side_effect = DataError(
+            "Data too long for column 'transaction_id' at row 1",
+        )
+
+        with self.assertLogs(level="WARNING") as cm:
+            self.client.delete(f"/api/documents/{doc.pk}/")
+            self.assertIn(
+                "Detected a possible incompatible database column",
+                cm.output[0],
+            )
 
 
 class TestDocumentApiV2(DirectoriesMixin, APITestCase):
@@ -2578,3 +2763,184 @@ class TestDocumentApiV2(DirectoriesMixin, APITestCase):
             self.client.get(f"/api/tags/{t.id}/", format="json").data["text_color"],
             "#000000",
         )
+
+
+class TestDocumentApiCustomFieldsSorting(DirectoriesMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+
+        self.user = User.objects.create_superuser(username="temp_admin")
+        self.client.force_authenticate(user=self.user)
+
+        self.doc1 = Document.objects.create(
+            title="none1",
+            checksum="A",
+            mime_type="application/pdf",
+        )
+        self.doc2 = Document.objects.create(
+            title="none2",
+            checksum="B",
+            mime_type="application/pdf",
+        )
+        self.doc3 = Document.objects.create(
+            title="none3",
+            checksum="C",
+            mime_type="application/pdf",
+        )
+
+        cache.clear()
+
+    def test_document_custom_fields_sorting(self):
+        """
+        GIVEN:
+            - Documents with custom fields
+        WHEN:
+            - API request for document filtering with custom field sorting
+        THEN:
+            - Documents are sorted by custom field values
+        """
+        values = {
+            CustomField.FieldDataType.STRING: {
+                "values": ["foo", "bar", "baz"],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.STRING
+                ],
+            },
+            CustomField.FieldDataType.INT: {
+                "values": [3, 1, 2],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.INT
+                ],
+            },
+            CustomField.FieldDataType.FLOAT: {
+                "values": [3.3, 1.1, 2.2],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.FLOAT
+                ],
+            },
+            CustomField.FieldDataType.BOOL: {
+                "values": [True, False, False],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.BOOL
+                ],
+            },
+            CustomField.FieldDataType.DATE: {
+                "values": [date(2021, 1, 3), date(2021, 1, 1), date(2021, 1, 2)],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.DATE
+                ],
+            },
+            CustomField.FieldDataType.URL: {
+                "values": [
+                    "http://example.org",
+                    "http://example.com",
+                    "http://example.net",
+                ],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.URL
+                ],
+            },
+            CustomField.FieldDataType.MONETARY: {
+                "values": ["USD789.00", "USD123.00", "USD456.00"],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.MONETARY
+                ],
+            },
+            CustomField.FieldDataType.DOCUMENTLINK: {
+                "values": [self.doc3.pk, self.doc1.pk, self.doc2.pk],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.DOCUMENTLINK
+                ],
+            },
+            CustomField.FieldDataType.SELECT: {
+                "values": ["ghi-789", "abc-123", "def-456"],
+                "field_name": CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP[
+                    CustomField.FieldDataType.SELECT
+                ],
+                "extra_data": {
+                    "select_options": [
+                        {"label": "Option 1", "id": "abc-123"},
+                        {"label": "Option 2", "id": "def-456"},
+                        {"label": "Option 3", "id": "ghi-789"},
+                    ],
+                },
+            },
+        }
+
+        for data_type, data in values.items():
+            CustomField.objects.all().delete()
+            CustomFieldInstance.objects.all().delete()
+            custom_field = CustomField.objects.create(
+                name=f"custom field {data_type}",
+                data_type=data_type,
+                extra_data=data.get("extra_data", {}),
+            )
+            for i, value in enumerate(data["values"]):
+                CustomFieldInstance.objects.create(
+                    document=[self.doc1, self.doc2, self.doc3][i],
+                    field=custom_field,
+                    **{data["field_name"]: value},
+                )
+            response = self.client.get(
+                f"/api/documents/?ordering=custom_field_{custom_field.pk}",
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            results = response.data["results"]
+            self.assertEqual(len(results), 3)
+            self.assertEqual(
+                [results[0]["id"], results[1]["id"], results[2]["id"]],
+                [self.doc2.id, self.doc3.id, self.doc1.id],
+            )
+
+            response = self.client.get(
+                f"/api/documents/?ordering=-custom_field_{custom_field.pk}",
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            results = response.data["results"]
+            self.assertEqual(len(results), 3)
+            if data_type == CustomField.FieldDataType.BOOL:
+                # just check the first one for bools, as the rest are the same
+                self.assertEqual(
+                    [results[0]["id"]],
+                    [self.doc1.id],
+                )
+            else:
+                self.assertEqual(
+                    [results[0]["id"], results[1]["id"], results[2]["id"]],
+                    [self.doc1.id, self.doc3.id, self.doc2.id],
+                )
+
+    def test_document_custom_fields_sorting_invalid(self):
+        """
+        GIVEN:
+            - Documents with custom fields
+        WHEN:
+            - API request for document filtering with invalid custom field sorting
+        THEN:
+            - 400 is returned
+        """
+
+        response = self.client.get(
+            "/api/documents/?ordering=custom_field_999",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_document_custom_fields_sorting_invalid_data_type(self):
+        """
+        GIVEN:
+            - Documents with custom fields
+        WHEN:
+            - API request for document filtering with a custom field sorting with a new (unhandled) data type
+        THEN:
+            - Error is raised
+        """
+
+        custom_field = CustomField.objects.create(
+            name="custom field",
+            data_type="foo",
+        )
+
+        with self.assertRaises(ValueError):
+            self.client.get(
+                f"/api/documents/?ordering=custom_field_{custom_field.pk}",
+            )

@@ -1,14 +1,20 @@
+import { DecimalPipe } from '@angular/common'
 import { Component, EventEmitter, Input, Output } from '@angular/core'
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
-import { interval, Subject, take } from 'rxjs'
+import { Subject } from 'rxjs'
+import { SafeHtmlPipe } from 'src/app/pipes/safehtml.pipe'
+import { LoadingComponentWithPermissions } from '../../loading-component/loading.component'
 
 @Component({
   selector: 'pngx-confirm-dialog',
   templateUrl: './confirm-dialog.component.html',
   styleUrls: ['./confirm-dialog.component.scss'],
+  imports: [DecimalPipe, SafeHtmlPipe],
 })
-export class ConfirmDialogComponent {
-  constructor(public activeModal: NgbActiveModal) {}
+export class ConfirmDialogComponent extends LoadingComponentWithPermissions {
+  constructor(public activeModal: NgbActiveModal) {
+    super()
+  }
 
   @Output()
   public confirmClicked = new EventEmitter()
@@ -53,26 +59,6 @@ export class ConfirmDialogComponent {
 
   confirmSubject: Subject<boolean>
   alternativeSubject: Subject<boolean>
-
-  delayConfirm(seconds: number) {
-    const refreshInterval = 0.15 // s
-
-    this.secondsTotal = seconds
-    this.seconds = seconds
-
-    interval(refreshInterval * 1000)
-      .pipe(
-        take(this.secondsTotal / refreshInterval + 2) // need 2 more for animation to complete after 0
-      )
-      .subscribe((count) => {
-        this.seconds = Math.max(
-          0,
-          this.secondsTotal - refreshInterval * (count + 1)
-        )
-        this.confirmButtonEnabled =
-          this.secondsTotal - refreshInterval * count < 0
-      })
-  }
 
   cancel() {
     this.confirmSubject?.next(false)

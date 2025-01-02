@@ -1,6 +1,7 @@
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import {
   HttpTestingController,
-  HttpClientTestingModule,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing'
 import { Component } from '@angular/core'
 import {
@@ -10,8 +11,8 @@ import {
   tick,
 } from '@angular/core/testing'
 import {
-  FormGroup,
   FormControl,
+  FormGroup,
   FormsModule,
   ReactiveFormsModule,
 } from '@angular/forms'
@@ -19,9 +20,9 @@ import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
 import { of } from 'rxjs'
 import {
   DEFAULT_MATCHING_ALGORITHM,
+  MATCH_ALL,
   MATCH_AUTO,
   MATCH_NONE,
-  MATCH_ALL,
 } from 'src/app/data/matching-model'
 import { Tag } from 'src/app/data/tag'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
@@ -37,6 +38,7 @@ import { EditDialogComponent, EditDialogMode } from './edit-dialog.component'
       <h4 class="modal-title" id="modal-basic-title">{{ getTitle() }}</h4>
     </div>
   `,
+  imports: [FormsModule, ReactiveFormsModule],
 })
 class TestComponent extends EditDialogComponent<Tag> {
   constructor(
@@ -95,7 +97,7 @@ describe('EditDialogComponent', () => {
 
   beforeEach(async () => {
     TestBed.configureTestingModule({
-      declarations: [TestComponent],
+      imports: [FormsModule, ReactiveFormsModule, TestComponent],
       providers: [
         NgbActiveModal,
         {
@@ -114,8 +116,9 @@ describe('EditDialogComponent', () => {
         },
         SettingsService,
         TagService,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
       ],
-      imports: [HttpClientTestingModule, FormsModule, ReactiveFormsModule],
     }).compileComponents()
 
     tagService = TestBed.inject(TagService)

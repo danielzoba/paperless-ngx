@@ -1,13 +1,14 @@
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import {
-  HttpClientTestingModule,
   HttpTestingController,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing'
-import { Subscription } from 'rxjs'
 import { TestBed } from '@angular/core/testing'
-import { environment } from 'src/environments/environment'
-import { SearchService } from './search.service'
-import { SettingsService } from '../settings.service'
+import { Subscription } from 'rxjs'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
+import { environment } from 'src/environments/environment'
+import { SettingsService } from '../settings.service'
+import { SearchService } from './search.service'
 
 let httpTestingController: HttpTestingController
 let service: SearchService
@@ -18,8 +19,12 @@ const endpoint = 'search/autocomplete'
 describe('SearchService', () => {
   beforeEach(() => {
     TestBed.configureTestingModule({
-      providers: [SearchService],
-      imports: [HttpClientTestingModule],
+      imports: [],
+      providers: [
+        SearchService,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
 
     httpTestingController = TestBed.inject(HttpTestingController)

@@ -33,7 +33,10 @@ class TikaDocumentParser(DocumentParser):
 
     def extract_metadata(self, document_path, mime_type):
         try:
-            with TikaClient(tika_url=settings.TIKA_ENDPOINT) as client:
+            with TikaClient(
+                tika_url=settings.TIKA_ENDPOINT,
+                timeout=settings.CELERY_TASK_TIME_LIMIT,
+            ) as client:
                 parsed = client.metadata.from_file(document_path, mime_type)
                 return [
                     {
@@ -54,7 +57,10 @@ class TikaDocumentParser(DocumentParser):
         self.log.info(f"Sending {document_path} to Tika server")
 
         try:
-            with TikaClient(tika_url=settings.TIKA_ENDPOINT) as client:
+            with TikaClient(
+                tika_url=settings.TIKA_ENDPOINT,
+                timeout=settings.CELERY_TASK_TIME_LIMIT,
+            ) as client:
                 try:
                     parsed = client.tika.as_text.from_file(document_path, mime_type)
                 except httpx.HTTPStatusError as err:
@@ -88,10 +94,13 @@ class TikaDocumentParser(DocumentParser):
 
         self.log.info(f"Converting {document_path} to PDF as {pdf_path}")
 
-        with GotenbergClient(
-            host=settings.TIKA_GOTENBERG_ENDPOINT,
-            timeout=settings.CELERY_TASK_TIME_LIMIT,
-        ) as client, client.libre_office.to_pdf() as route:
+        with (
+            GotenbergClient(
+                host=settings.TIKA_GOTENBERG_ENDPOINT,
+                timeout=settings.CELERY_TASK_TIME_LIMIT,
+            ) as client,
+            client.libre_office.to_pdf() as route,
+        ):
             # Set the output format of the resulting PDF
             if settings.OCR_OUTPUT_TYPE in {
                 OutputTypeChoices.PDF_A,
@@ -99,7 +108,10 @@ class TikaDocumentParser(DocumentParser):
             }:
                 route.pdf_format(PdfAFormat.A2b)
             elif settings.OCR_OUTPUT_TYPE == OutputTypeChoices.PDF_A1:
-                route.pdf_format(PdfAFormat.A1a)
+                self.log.warning(
+                    "Gotenberg does not support PDF/A-1a, choosing PDF/A-2b instead",
+                )
+                route.pdf_format(PdfAFormat.A2b)
             elif settings.OCR_OUTPUT_TYPE == OutputTypeChoices.PDF_A3:
                 route.pdf_format(PdfAFormat.A3b)
 

@@ -1,7 +1,7 @@
-import { ObjectWithId } from 'src/app/data/object-with-id'
-import { AbstractPaperlessService } from './abstract-paperless-service'
-import { PermissionsObject } from 'src/app/data/object-with-permissions'
 import { Observable } from 'rxjs'
+import { ObjectWithId } from 'src/app/data/object-with-id'
+import { PermissionsObject } from 'src/app/data/object-with-permissions'
+import { AbstractPaperlessService } from './abstract-paperless-service'
 
 export enum BulkEditObjectOperation {
   SetPermissions = 'set_permissions',
@@ -17,9 +17,10 @@ export abstract class AbstractNameFilterService<
     sortField?: string,
     sortReverse?: boolean,
     nameFilter?: string,
-    fullPerms?: boolean
+    fullPerms?: boolean,
+    extraParams?: { [key: string]: any }
   ) {
-    let params = {}
+    let params = extraParams ?? {}
     if (nameFilter) {
       params['name__icontains'] = nameFilter
     }

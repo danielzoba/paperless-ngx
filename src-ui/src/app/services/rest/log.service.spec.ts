@@ -1,9 +1,10 @@
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import {
-  HttpClientTestingModule,
   HttpTestingController,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing'
-import { Subscription } from 'rxjs'
 import { TestBed } from '@angular/core/testing'
+import { Subscription } from 'rxjs'
 import { environment } from 'src/environments/environment'
 import { LogService } from './log.service'
 
@@ -15,8 +16,12 @@ const endpoint = 'logs'
 describe('LogService', () => {
   beforeEach(() => {
     TestBed.configureTestingModule({
-      providers: [LogService],
-      imports: [HttpClientTestingModule],
+      imports: [],
+      providers: [
+        LogService,
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
 
     httpTestingController = TestBed.inject(HttpTestingController)

@@ -1,6 +1,8 @@
+import { Clipboard } from '@angular/cdk/clipboard'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import {
   HttpTestingController,
-  HttpClientTestingModule,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing'
 import {
   ComponentFixture,
@@ -8,16 +10,14 @@ import {
   fakeAsync,
   tick,
 } from '@angular/core/testing'
-import { FormsModule, ReactiveFormsModule } from '@angular/forms'
+import { By } from '@angular/platform-browser'
+import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import { of, throwError } from 'rxjs'
 import { FileVersion, ShareLink } from 'src/app/data/share-link'
 import { ShareLinkService } from 'src/app/services/rest/share-link.service'
 import { ToastService } from 'src/app/services/toast.service'
 import { environment } from 'src/environments/environment'
 import { ShareLinksDropdownComponent } from './share-links-dropdown.component'
-import { Clipboard } from '@angular/cdk/clipboard'
-import { By } from '@angular/platform-browser'
-import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 
 describe('ShareLinksDropdownComponent', () => {
   let component: ShareLinksDropdownComponent
@@ -29,12 +29,13 @@ describe('ShareLinksDropdownComponent', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      declarations: [ShareLinksDropdownComponent],
       imports: [
-        HttpClientTestingModule,
-        FormsModule,
-        ReactiveFormsModule,
+        ShareLinksDropdownComponent,
         NgxBootstrapIconsModule.pick(allIcons),
+      ],
+      providers: [
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
       ],
     })
 

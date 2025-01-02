@@ -1,7 +1,11 @@
-import { Component, forwardRef, Inject, LOCALE_ID } from '@angular/core'
-import { NG_VALUE_ACCESSOR } from '@angular/forms'
+import { CurrencyPipe, getLocaleCurrencyCode } from '@angular/common'
+import { Component, forwardRef, Inject, Input, LOCALE_ID } from '@angular/core'
+import {
+  FormsModule,
+  NG_VALUE_ACCESSOR,
+  ReactiveFormsModule,
+} from '@angular/forms'
 import { AbstractInputComponent } from '../abstract-input'
-import { getLocaleCurrencyCode } from '@angular/common'
 
 @Component({
   providers: [
@@ -14,6 +18,7 @@ import { getLocaleCurrencyCode } from '@angular/common'
   selector: 'pngx-input-monetary',
   templateUrl: './monetary.component.html',
   styleUrls: ['./monetary.component.scss'],
+  imports: [CurrencyPipe, FormsModule, ReactiveFormsModule],
 })
 export class MonetaryComponent extends AbstractInputComponent<string> {
   public currency: string = ''
@@ -29,11 +34,16 @@ export class MonetaryComponent extends AbstractInputComponent<string> {
 
   defaultCurrencyCode: string
 
+  @Input()
+  set defaultCurrency(currency: string) {
+    if (currency) this.defaultCurrencyCode = currency
+  }
+
   constructor(@Inject(LOCALE_ID) currentLocale: string) {
     super()
 
     this.currency = this.defaultCurrencyCode =
-      getLocaleCurrencyCode(currentLocale)
+      this.defaultCurrency ?? getLocaleCurrencyCode(currentLocale)
   }
 
   writeValue(newValue: any): void {

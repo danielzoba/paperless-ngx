@@ -1,4 +1,5 @@
-import { HttpClientTestingModule } from '@angular/common/http/testing'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
 import {
   ComponentFixture,
   TestBed,
@@ -7,14 +8,9 @@ import {
 } from '@angular/core/testing'
 import { By } from '@angular/platform-browser'
 import { RouterTestingModule } from '@angular/router/testing'
-import {
-  NgbModule,
-  NgbAlertModule,
-  NgbAlert,
-  NgbCollapse,
-} from '@ng-bootstrap/ng-bootstrap'
+import { NgbAlert, NgbCollapse } from '@ng-bootstrap/ng-bootstrap'
+import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import { routes } from 'src/app/app-routing.module'
-import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import {
   ConsumerStatusService,
@@ -23,10 +19,7 @@ import {
 } from 'src/app/services/consumer-status.service'
 import { PermissionsService } from 'src/app/services/permissions.service'
 import { UploadDocumentsService } from 'src/app/services/upload-documents.service'
-import { WidgetFrameComponent } from '../widget-frame/widget-frame.component'
 import { UploadFileWidgetComponent } from './upload-file-widget.component'
-import { DragDropModule } from '@angular/cdk/drag-drop'
-import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 
 const FAILED_STATUSES = [new FileStatus()]
 const WORKING_STATUSES = [new FileStatus(), new FileStatus()]
@@ -54,10 +47,10 @@ describe('UploadFileWidgetComponent', () => {
 
   beforeEach(async () => {
     TestBed.configureTestingModule({
-      declarations: [
+      imports: [
+        RouterTestingModule.withRoutes(routes),
+        NgxBootstrapIconsModule.pick(allIcons),
         UploadFileWidgetComponent,
-        WidgetFrameComponent,
-        IfPermissionsDirective,
       ],
       providers: [
         PermissionsGuard,
@@ -67,14 +60,8 @@ describe('UploadFileWidgetComponent', () => {
             currentUserCan: () => true,
           },
         },
-      ],
-      imports: [
-        HttpClientTestingModule,
-        NgbModule,
-        RouterTestingModule.withRoutes(routes),
-        NgbAlertModule,
-        DragDropModule,
-        NgxBootstrapIconsModule.pick(allIcons),
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
       ],
     }).compileComponents()
 

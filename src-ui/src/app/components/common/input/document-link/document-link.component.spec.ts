@@ -1,15 +1,11 @@
-import { HttpClientTestingModule } from '@angular/common/http/testing'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import { provideHttpClientTesting } from '@angular/common/http/testing'
 import { ComponentFixture, TestBed } from '@angular/core/testing'
-import {
-  FormsModule,
-  NG_VALUE_ACCESSOR,
-  ReactiveFormsModule,
-} from '@angular/forms'
-import { NgSelectModule } from '@ng-select/ng-select'
+import { NG_VALUE_ACCESSOR } from '@angular/forms'
 import { of, throwError } from 'rxjs'
+import { FILTER_TITLE } from 'src/app/data/filter-rule-type'
 import { DocumentService } from 'src/app/services/rest/document.service'
 import { DocumentLinkComponent } from './document-link.component'
-import { FILTER_TITLE } from 'src/app/data/filter-rule-type'
 
 const documents = [
   {
@@ -37,12 +33,10 @@ describe('DocumentLinkComponent', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      declarations: [DocumentLinkComponent],
-      imports: [
-        HttpClientTestingModule,
-        NgSelectModule,
-        FormsModule,
-        ReactiveFormsModule,
+      imports: [DocumentLinkComponent],
+      providers: [
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
       ],
     })
     documentService = TestBed.inject(DocumentService)
@@ -64,6 +58,20 @@ describe('DocumentLinkComponent', () => {
     })
     component.writeValue([1])
     expect(getSpy).toHaveBeenCalled()
+  })
+
+  it('shoud maintain ordering of selected documents', () => {
+    const getSpy = jest.spyOn(documentService, 'getFew')
+    getSpy.mockImplementation((ids) => {
+      const docs = documents.filter((d) => ids.includes(d.id))
+      return of({
+        count: docs.length,
+        all: docs.map((d) => d.id),
+        results: docs,
+      })
+    })
+    component.writeValue([12, 1])
+    expect(component.selectedDocuments).toEqual([documents[1], documents[0]])
   })
 
   it('should search API on select text input', () => {

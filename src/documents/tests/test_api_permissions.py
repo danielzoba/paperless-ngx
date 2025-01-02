@@ -1,5 +1,6 @@
 import json
 
+from allauth.mfa.models import Authenticator
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
@@ -432,13 +433,18 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
 
         resp_data = response.json()
 
-        self.assertNotIn("permissions", resp_data["results"][0])
-        self.assertIn("user_can_change", resp_data["results"][0])
-        self.assertTrue(resp_data["results"][0]["user_can_change"])  # doc1
-        self.assertFalse(resp_data["results"][0]["is_shared_by_requester"])  # doc1
-        self.assertFalse(resp_data["results"][1]["user_can_change"])  # doc2
-        self.assertTrue(resp_data["results"][2]["user_can_change"])  # doc3
-        self.assertTrue(resp_data["results"][3]["is_shared_by_requester"])  # doc4
+        # The response will contain the documents in reversed order of creation
+        # due to #6982, but previously this code relied on implicit ordering
+        # so let's ensure the order is as expected:
+        results = resp_data["results"][::-1]
+
+        self.assertNotIn("permissions", results[0])
+        self.assertIn("user_can_change", results[0])
+        self.assertTrue(results[0]["user_can_change"])  # doc1
+        self.assertFalse(results[0]["is_shared_by_requester"])  # doc1
+        self.assertFalse(results[1]["user_can_change"])  # doc2
+        self.assertTrue(results[2]["user_can_change"])  # doc3
+        self.assertTrue(results[3]["is_shared_by_requester"])  # doc4
 
         response = self.client.get(
             "/api/documents/?full_perms=true",
@@ -449,9 +455,12 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
 
         resp_data = response.json()
 
-        self.assertIn("permissions", resp_data["results"][0])
-        self.assertNotIn("user_can_change", resp_data["results"][0])
-        self.assertNotIn("is_shared_by_requester", resp_data["results"][0])
+        # See above about response ordering
+        results = resp_data["results"][::-1]
+
+        self.assertIn("permissions", results[0])
+        self.assertNotIn("user_can_change", results[0])
+        self.assertNotIn("is_shared_by_requester", results[0])
 
 
 class TestApiUser(DirectoriesMixin, APITestCase):
@@ -592,6 +601,59 @@ class TestApiUser(DirectoriesMixin, APITestCase):
         returned_user2 = User.objects.get(pk=user1.pk)
         self.assertEqual(returned_user2.first_name, "Updated Name 2")
         self.assertNotEqual(returned_user2.password, initial_password)
+
+    def test_deactivate_totp(self):
+        """
+        GIVEN:
+            - Existing user account with TOTP enabled
+        WHEN:
+            - API request by a superuser is made to deactivate TOTP
+            - API request by a regular user is made to deactivate TOTP
+        THEN:
+            - TOTP is deactivated, if exists
+            - Regular user is forbidden from deactivating TOTP
+        """
+
+        user1 = User.objects.create(
+            username="testuser",
+            password="test",
+            first_name="Test",
+            last_name="User",
+        )
+        Authenticator.objects.create(
+            user=user1,
+            type=Authenticator.Type.TOTP,
+            data={},
+        )
+
+        response = self.client.post(
+            f"{self.ENDPOINT}{user1.pk}/deactivate_totp/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(Authenticator.objects.filter(user=user1).count(), 0)
+
+        # fail if already deactivated
+        response = self.client.post(
+            f"{self.ENDPOINT}{user1.pk}/deactivate_totp/",
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        regular_user = User.objects.create_user(username="regular_user")
+        regular_user.user_permissions.add(
+            *Permission.objects.all(),
+        )
+        self.client.force_authenticate(regular_user)
+        Authenticator.objects.create(
+            user=user1,
+            type=Authenticator.Type.TOTP,
+            data={},
+        )
+
+        response = self.client.post(
+            f"{self.ENDPOINT}{user1.pk}/deactivate_totp/",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class TestApiGroup(DirectoriesMixin, APITestCase):

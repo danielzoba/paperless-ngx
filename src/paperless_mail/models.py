@@ -15,6 +15,11 @@ class MailAccount(document_models.ModelWithOwner):
         SSL = 2, _("Use SSL")
         STARTTLS = 3, _("Use STARTTLS")
 
+    class MailAccountType(models.IntegerChoices):
+        IMAP = 1, _("IMAP")
+        GMAIL_OAUTH = 2, _("Gmail OAuth")
+        OUTLOOK_OAUTH = 3, _("Outlook OAuth")
+
     name = models.CharField(_("name"), max_length=256, unique=True)
 
     imap_server = models.CharField(_("IMAP server"), max_length=256)
@@ -37,7 +42,7 @@ class MailAccount(document_models.ModelWithOwner):
 
     username = models.CharField(_("username"), max_length=256)
 
-    password = models.CharField(_("password"), max_length=2048)
+    password = models.TextField(_("password"))
 
     is_token = models.BooleanField(_("Is token authentication"), default=False)
 
@@ -51,6 +56,30 @@ class MailAccount(document_models.ModelWithOwner):
         ),
     )
 
+    account_type = models.PositiveIntegerField(
+        _("account type"),
+        choices=MailAccountType.choices,
+        default=MailAccountType.IMAP,
+    )
+
+    refresh_token = models.TextField(
+        _("refresh token"),
+        blank=True,
+        null=True,
+        help_text=_(
+            "The refresh token to use for token authentication e.g. with oauth2.",
+        ),
+    )
+
+    expiration = models.DateTimeField(
+        _("expiration"),
+        blank=True,
+        null=True,
+        help_text=_(
+            "The expiration date of the refresh token. ",
+        ),
+    )
+
     def __str__(self):
         return self.name
 
@@ -59,13 +88,27 @@ class MailRule(document_models.ModelWithOwner):
     class Meta:
         verbose_name = _("mail rule")
         verbose_name_plural = _("mail rules")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name", "owner"],
+                name="%(app_label)s_%(class)s_unique_name_owner",
+            ),
+            models.UniqueConstraint(
+                name="%(app_label)s_%(class)s_name_unique",
+                fields=["name"],
+                condition=models.Q(owner__isnull=True),
+            ),
+        ]
 
     class ConsumptionScope(models.IntegerChoices):
         ATTACHMENTS_ONLY = 1, _("Only process attachments.")
         EML_ONLY = 2, _("Process full Mail (with embedded attachments in file) as .eml")
-        EVERYTHING = 3, _(
-            "Process full Mail (with embedded attachments in file) as .eml "
-            "+ process attachments as separate documents",
+        EVERYTHING = (
+            3,
+            _(
+                "Process full Mail (with embedded attachments in file) as .eml "
+                "+ process attachments as separate documents",
+            ),
         )
 
     class AttachmentProcessing(models.IntegerChoices):
@@ -90,7 +133,7 @@ class MailRule(document_models.ModelWithOwner):
         FROM_NAME = 3, _("Use name (or mail address if not available)")
         FROM_CUSTOM = 4, _("Use correspondent selected below")
 
-    name = models.CharField(_("name"), max_length=256, unique=True)
+    name = models.CharField(_("name"), max_length=256)
 
     order = models.IntegerField(_("order"), default=0)
 
@@ -100,6 +143,8 @@ class MailRule(document_models.ModelWithOwner):
         on_delete=models.CASCADE,
         verbose_name=_("account"),
     )
+
+    enabled = models.BooleanField(_("enabled"), default=True)
 
     folder = models.CharField(
         _("folder"),

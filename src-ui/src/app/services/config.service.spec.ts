@@ -1,12 +1,13 @@
 import { TestBed } from '@angular/core/testing'
 
-import { ConfigService } from './config.service'
+import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import {
-  HttpClientTestingModule,
   HttpTestingController,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing'
 import { environment } from 'src/environments/environment'
 import { OutputTypeConfig, PaperlessConfig } from '../data/paperless-config'
+import { ConfigService } from './config.service'
 
 describe('ConfigService', () => {
   let service: ConfigService
@@ -14,7 +15,11 @@ describe('ConfigService', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      imports: [HttpClientTestingModule],
+      imports: [],
+      providers: [
+        provideHttpClient(withInterceptorsFromDi()),
+        provideHttpClientTesting(),
+      ],
     })
     service = TestBed.inject(ConfigService)
     httpTestingController = TestBed.inject(HttpTestingController)

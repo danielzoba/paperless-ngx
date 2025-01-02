@@ -1,7 +1,8 @@
-import { test, expect } from '@playwright/test'
+import { expect, test } from '@playwright/test'
+import path from 'node:path'
 
-const REQUESTS_HAR = 'e2e/document-detail/requests/api-document-detail.har'
-const REQUESTS_HAR2 = 'e2e/document-detail/requests/api-document-detail2.har'
+const REQUESTS_HAR = path.join(__dirname, 'requests/api-document-detail.har')
+const REQUESTS_HAR2 = path.join(__dirname, 'requests/api-document-detail2.har')
 
 test('should activate / deactivate save button when changes are saved', async ({
   page,
@@ -71,7 +72,7 @@ test('should show a mobile preview', async ({ page }) => {
   await page.setViewportSize({ width: 400, height: 1000 })
   await expect(page.getByRole('tab', { name: 'Preview' })).toBeVisible()
   await page.getByRole('tab', { name: 'Preview' }).click()
-  await page.waitForSelector('pngx-pdf-viewer')
+  await page.waitForSelector('pdf-viewer')
 })
 
 test('should show a list of notes', async ({ page }) => {

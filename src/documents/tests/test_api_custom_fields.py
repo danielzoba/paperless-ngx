@@ -1,5 +1,8 @@
+import json
 from datetime import date
+from unittest.mock import ANY
 
+from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -49,9 +52,36 @@ class TestCustomFieldsAPI(DirectoriesMixin, APITestCase):
 
             data = resp.json()
 
-            self.assertEqual(len(data), 3)
             self.assertEqual(data["name"], name)
             self.assertEqual(data["data_type"], field_type)
+
+        resp = self.client.post(
+            self.ENDPOINT,
+            json.dumps(
+                {
+                    "data_type": "select",
+                    "name": "Select Field",
+                    "extra_data": {
+                        "select_options": [
+                            {"label": "Option 1", "id": "abc-123"},
+                            {"label": "Option 2", "id": "def-456"},
+                        ],
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        data = resp.json()
+
+        self.assertCountEqual(
+            data["extra_data"]["select_options"],
+            [
+                {"label": "Option 1", "id": "abc-123"},
+                {"label": "Option 2", "id": "def-456"},
+            ],
+        )
 
     def test_create_custom_field_nonunique_name(self):
         """
@@ -75,6 +105,232 @@ class TestCustomFieldsAPI(DirectoriesMixin, APITestCase):
             },
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_custom_field_select_invalid_options(self):
+        """
+        GIVEN:
+            - Custom field does not exist
+        WHEN:
+            - API request to create custom field with invalid select options
+        THEN:
+            - HTTP 400 is returned
+        """
+
+        # Not a list
+        resp = self.client.post(
+            self.ENDPOINT,
+            json.dumps(
+                {
+                    "data_type": "select",
+                    "name": "Select Field",
+                    "extra_data": {
+                        "select_options": "not a list",
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # No options
+        resp = self.client.post(
+            self.ENDPOINT,
+            json.dumps(
+                {
+                    "data_type": "select",
+                    "name": "Select Field",
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_custom_field_select_unique_ids(self):
+        """
+        GIVEN:
+            - Nothing
+            - Existing custom field
+        WHEN:
+            - API request to create custom field with select options without id
+        THEN:
+            - Unique ids are generated for each option
+        """
+        resp = self.client.post(
+            self.ENDPOINT,
+            json.dumps(
+                {
+                    "data_type": "select",
+                    "name": "Select Field",
+                    "extra_data": {
+                        "select_options": [
+                            {"label": "Option 1"},
+                            {"label": "Option 2"},
+                        ],
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        data = resp.json()
+
+        self.assertCountEqual(
+            data["extra_data"]["select_options"],
+            [
+                {"label": "Option 1", "id": ANY},
+                {"label": "Option 2", "id": ANY},
+            ],
+        )
+
+        # Add a new option
+        resp = self.client.patch(
+            f"{self.ENDPOINT}{data['id']}/",
+            json.dumps(
+                {
+                    "extra_data": {
+                        "select_options": data["extra_data"]["select_options"]
+                        + [{"label": "Option 3"}],
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        data = resp.json()
+
+        self.assertCountEqual(
+            data["extra_data"]["select_options"],
+            [
+                {"label": "Option 1", "id": ANY},
+                {"label": "Option 2", "id": ANY},
+                {"label": "Option 3", "id": ANY},
+            ],
+        )
+
+    def test_custom_field_select_options_pruned(self):
+        """
+        GIVEN:
+            - Select custom field exists and document instance with one of the options
+        WHEN:
+            - API request to remove an option from the select field
+        THEN:
+            - The option is removed from the field
+            - The option is removed from the document instance
+        """
+        custom_field_select = CustomField.objects.create(
+            name="Select Field",
+            data_type=CustomField.FieldDataType.SELECT,
+            extra_data={
+                "select_options": [
+                    {"label": "Option 1", "id": "abc-123"},
+                    {"label": "Option 2", "id": "def-456"},
+                    {"label": "Option 3", "id": "ghi-789"},
+                ],
+            },
+        )
+
+        doc = Document.objects.create(
+            title="WOW",
+            content="the content",
+            checksum="123",
+            mime_type="application/pdf",
+        )
+        CustomFieldInstance.objects.create(
+            document=doc,
+            field=custom_field_select,
+            value_text="abc-123",
+        )
+
+        resp = self.client.patch(
+            f"{self.ENDPOINT}{custom_field_select.id}/",
+            json.dumps(
+                {
+                    "extra_data": {
+                        "select_options": [
+                            {"label": "Option 1", "id": "abc-123"},
+                            {"label": "Option 3", "id": "ghi-789"},
+                        ],
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        data = resp.json()
+
+        self.assertCountEqual(
+            data["extra_data"]["select_options"],
+            [
+                {"label": "Option 1", "id": "abc-123"},
+                {"label": "Option 3", "id": "ghi-789"},
+            ],
+        )
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.custom_fields.first().value, None)
+
+    def test_create_custom_field_monetary_validation(self):
+        """
+        GIVEN:
+            - Custom field does not exist
+        WHEN:
+            - API request to create custom field with invalid default currency option
+            - API request to create custom field with valid default currency option
+        THEN:
+            - HTTP 400 is returned
+            - HTTP 201 is returned
+        """
+
+        # not a string
+        resp = self.client.post(
+            self.ENDPOINT,
+            json.dumps(
+                {
+                    "data_type": "monetary",
+                    "name": "Monetary Field",
+                    "extra_data": {
+                        "default_currency": 123,
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # not a 3-letter currency code
+        resp = self.client.post(
+            self.ENDPOINT,
+            json.dumps(
+                {
+                    "data_type": "monetary",
+                    "name": "Monetary Field",
+                    "extra_data": {
+                        "default_currency": "EU",
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # valid currency code
+        resp = self.client.post(
+            self.ENDPOINT,
+            json.dumps(
+                {
+                    "data_type": "monetary",
+                    "name": "Monetary Field",
+                    "extra_data": {
+                        "default_currency": "EUR",
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
 
     def test_create_custom_field_instance(self):
         """
@@ -135,6 +391,16 @@ class TestCustomFieldsAPI(DirectoriesMixin, APITestCase):
             name="Test Custom Field Doc Link",
             data_type=CustomField.FieldDataType.DOCUMENTLINK,
         )
+        custom_field_select = CustomField.objects.create(
+            name="Test Custom Field Select",
+            data_type=CustomField.FieldDataType.SELECT,
+            extra_data={
+                "select_options": [
+                    {"label": "Option 1", "id": "abc-123"},
+                    {"label": "Option 2", "id": "def-456"},
+                ],
+            },
+        )
 
         date_value = date.today()
 
@@ -178,6 +444,10 @@ class TestCustomFieldsAPI(DirectoriesMixin, APITestCase):
                         "field": custom_field_documentlink.id,
                         "value": [doc2.id],
                     },
+                    {
+                        "field": custom_field_select.id,
+                        "value": "abc-123",
+                    },
                 ],
             },
             format="json",
@@ -199,11 +469,12 @@ class TestCustomFieldsAPI(DirectoriesMixin, APITestCase):
                 {"field": custom_field_monetary.id, "value": "EUR11.10"},
                 {"field": custom_field_monetary2.id, "value": "11.1"},
                 {"field": custom_field_documentlink.id, "value": [doc2.id]},
+                {"field": custom_field_select.id, "value": "abc-123"},
             ],
         )
 
         doc.refresh_from_db()
-        self.assertEqual(len(doc.custom_fields.all()), 9)
+        self.assertEqual(len(doc.custom_fields.all()), 10)
 
     def test_change_custom_field_instance_value(self):
         """
@@ -568,6 +839,83 @@ class TestCustomFieldsAPI(DirectoriesMixin, APITestCase):
         self.assertEqual(CustomFieldInstance.objects.count(), 0)
         self.assertEqual(len(doc.custom_fields.all()), 0)
 
+    def test_custom_field_value_select_validation(self):
+        """
+        GIVEN:
+            - Document & custom field exist
+        WHEN:
+            - API request to set a field value to something not in the select options
+        THEN:
+            - HTTP 400 is returned
+            - No field instance is created or attached to the document
+        """
+        doc = Document.objects.create(
+            title="WOW",
+            content="the content",
+            checksum="123",
+            mime_type="application/pdf",
+        )
+        custom_field_select = CustomField.objects.create(
+            name="Test Custom Field SELECT",
+            data_type=CustomField.FieldDataType.SELECT,
+            extra_data={
+                "select_options": [
+                    {"label": "Option 1", "id": "abc-123"},
+                    {"label": "Option 2", "id": "def-456"},
+                ],
+            },
+        )
+
+        resp = self.client.patch(
+            f"/api/documents/{doc.id}/",
+            data={
+                "custom_fields": [
+                    {"field": custom_field_select.id, "value": "not an option"},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(CustomFieldInstance.objects.count(), 0)
+        self.assertEqual(len(doc.custom_fields.all()), 0)
+
+    def test_custom_field_value_documentlink_validation(self):
+        """
+        GIVEN:
+            - Document & custom field exist
+        WHEN:
+            - API request to set a field value to a document that does not exist
+        THEN:
+            - HTTP 400 is returned
+            - No field instance is created or attached to the document
+        """
+
+        doc = Document.objects.create(
+            title="WOW",
+            content="the content",
+            checksum="123",
+            mime_type="application/pdf",
+        )
+        custom_field_documentlink = CustomField.objects.create(
+            name="Test Custom Field Doc Link",
+            data_type=CustomField.FieldDataType.DOCUMENTLINK,
+        )
+
+        resp = self.client.patch(
+            f"/api/documents/{doc.id}/",
+            data={
+                "custom_fields": [
+                    {"field": custom_field_documentlink.id, "value": [999]},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(CustomFieldInstance.objects.count(), 0)
+        self.assertEqual(len(doc.custom_fields.all()), 0)
+
     def test_custom_field_not_null(self):
         """
         GIVEN:
@@ -762,3 +1110,51 @@ class TestCustomFieldsAPI(DirectoriesMixin, APITestCase):
         results = response.data["results"]
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["name"], custom_field_int.name)
+
+    def test_custom_fields_document_count(self):
+        custom_field_string = CustomField.objects.create(
+            name="Test Custom Field String",
+            data_type=CustomField.FieldDataType.STRING,
+        )
+        doc = Document.objects.create(
+            title="WOW",
+            content="the content",
+            checksum="123",
+            mime_type="application/pdf",
+            owner=self.user,
+        )
+
+        response = self.client.get(
+            f"{self.ENDPOINT}",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        self.assertEqual(results[0]["document_count"], 0)
+
+        CustomFieldInstance.objects.create(
+            document=doc,
+            field=custom_field_string,
+            value_text="test value",
+        )
+
+        response = self.client.get(
+            f"{self.ENDPOINT}",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        self.assertEqual(results[0]["document_count"], 1)
+
+        # Test as user without access to the document
+        non_superuser = User.objects.create_user(username="non_superuser")
+        non_superuser.user_permissions.add(
+            *Permission.objects.all(),
+        )
+        non_superuser.save()
+        self.client.force_authenticate(user=non_superuser)
+        self.client.force_login(user=non_superuser)
+        response = self.client.get(
+            f"{self.ENDPOINT}",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data["results"]
+        self.assertEqual(results[0]["document_count"], 0)
