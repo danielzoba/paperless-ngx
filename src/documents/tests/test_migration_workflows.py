@@ -8,7 +8,7 @@ class TestMigrateWorkflow(TestMigrations):
     dependencies = (
         (
             "paperless_mail",
-            "0028_alter_mailaccount_password_and_more",
+            "0029_mailrule_pdf_layout",
         ),
     )
 
@@ -104,7 +104,7 @@ class TestReverseMigrateWorkflow(TestMigrations):
 
         trigger = WorkflowTrigger.objects.create(
             type=0,
-            sources=[DocumentSource.ConsumeFolder],
+            sources=[str(DocumentSource.ConsumeFolder)],
             filter_path="*/path/*",
             filter_filename="*file*",
         )

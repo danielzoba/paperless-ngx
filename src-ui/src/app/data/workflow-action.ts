@@ -22,6 +22,8 @@ export interface WorkflowActionWebhook extends ObjectWithId {
 
   use_params?: boolean
 
+  as_json?: boolean
+
   params?: object
 
   body?: string
@@ -55,6 +57,8 @@ export interface WorkflowAction extends ObjectWithId {
   assign_change_groups?: number[] // [Group.id]
 
   assign_custom_fields?: number[] // [CustomField.id]
+
+  assign_custom_fields_values?: object
 
   remove_tags?: number[] // Tag.id
 

@@ -1,23 +1,20 @@
 import datetime
-import logging
-import os
-import re
-from collections import OrderedDict
 from pathlib import Path
 from typing import Final
 
-import dateutil.parser
 import pathvalidate
 from celery import states
 from django.conf import settings
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator
 from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from multiselectfield import MultiSelectField
+from treenode.models import TreeNodeModel
 
 if settings.AUDIT_LOG_ENABLED:
     from auditlog.registry import auditlog
@@ -101,8 +98,10 @@ class Correspondent(MatchingModel):
         verbose_name_plural = _("correspondents")
 
 
-class Tag(MatchingModel):
+class Tag(MatchingModel, TreeNodeModel):
     color = models.CharField(_("color"), max_length=7, default="#a6cee3")
+    # Maximum allowed nesting depth for tags (root = 1, max depth = 5)
+    MAX_NESTING_DEPTH: Final[int] = 5
 
     is_inbox_tag = models.BooleanField(
         _("is inbox tag"),
@@ -113,9 +112,29 @@ class Tag(MatchingModel):
         ),
     )
 
-    class Meta(MatchingModel.Meta):
+    class Meta(MatchingModel.Meta, TreeNodeModel.Meta):
         verbose_name = _("tag")
         verbose_name_plural = _("tags")
+
+    def clean(self):
+        # Prevent self-parenting and assigning a descendant as parent
+        parent = self.get_parent()
+        if parent == self:
+            raise ValidationError({"parent": _("Cannot set itself as parent.")})
+        if parent and self.pk is not None and self.is_ancestor_of(parent):
+            raise ValidationError({"parent": _("Cannot set parent to a descendant.")})
+
+        # Enforce maximum nesting depth
+        new_parent_depth = 0
+        if parent:
+            new_parent_depth = parent.get_ancestors_count() + 1
+
+        height = 0 if self.pk is None else self.get_depth()
+        deepest_new_depth = (new_parent_depth + 1) + height
+        if deepest_new_depth > self.MAX_NESTING_DEPTH:
+            raise ValidationError({"parent": _("Maximum nesting depth exceeded.")})
+
+        return super().clean()
 
 
 class DocumentType(MatchingModel):
@@ -218,7 +237,11 @@ class Document(SoftDeleteModel, ModelWithOwner):
         ),
     )
 
-    created = models.DateTimeField(_("created"), default=timezone.now, db_index=True)
+    created = models.DateField(
+        _("created"),
+        default=datetime.date.today,
+        db_index=True,
+    )
 
     modified = models.DateTimeField(
         _("modified"),
@@ -296,8 +319,7 @@ class Document(SoftDeleteModel, ModelWithOwner):
         verbose_name_plural = _("documents")
 
     def __str__(self) -> str:
-        # Convert UTC database time to local time
-        created = datetime.date.isoformat(timezone.localdate(self.created))
+        created = self.created.isoformat()
 
         res = f"{created}"
 
@@ -306,6 +328,28 @@ class Document(SoftDeleteModel, ModelWithOwner):
         if self.title:
             res += f" {self.title}"
         return res
+
+    @property
+    def suggestion_content(self):
+        """
+        Returns the document text used to generate suggestions.
+
+        If the document content length exceeds a specified limit,
+        the text is cropped to include the start and end segments.
+        Otherwise, the full content is returned.
+
+        This improves processing speed for large documents while keeping
+        enough context for accurate suggestions.
+        """
+        if not self.content or len(self.content) <= 1200000:
+            return self.content
+        else:
+            # Use 80% from the start and 20% from the end
+            # to preserve both opening and closing context.
+            head_len = 800000
+            tail_len = 200000
+
+            return " ".join((self.content[:head_len], self.content[-tail_len:]))
 
     @property
     def source_path(self) -> Path:
@@ -320,7 +364,7 @@ class Document(SoftDeleteModel, ModelWithOwner):
 
     @property
     def source_file(self):
-        return open(self.source_path, "rb")
+        return Path(self.source_path).open("rb")
 
     @property
     def has_archive_version(self) -> bool:
@@ -335,9 +379,9 @@ class Document(SoftDeleteModel, ModelWithOwner):
 
     @property
     def archive_file(self):
-        return open(self.archive_path, "rb")
+        return Path(self.archive_path).open("rb")
 
-    def get_public_filename(self, archive=False, counter=0, suffix=None) -> str:
+    def get_public_filename(self, *, archive=False, counter=0, suffix=None) -> str:
         """
         Returns a sanitized filename for the document, not including any paths.
         """
@@ -372,41 +416,20 @@ class Document(SoftDeleteModel, ModelWithOwner):
 
     @property
     def thumbnail_file(self):
-        return open(self.thumbnail_path, "rb")
+        return Path(self.thumbnail_path).open("rb")
 
     @property
     def created_date(self):
-        return timezone.localdate(self.created)
+        return self.created
 
+    def add_nested_tags(self, tags):
+        tag_ids = set()
+        for tag in tags:
+            tag_ids.add(tag.id)
+            tag_ids.update(tag.get_ancestors_pks())
 
-class Log(models.Model):
-    LEVELS = (
-        (logging.DEBUG, _("debug")),
-        (logging.INFO, _("information")),
-        (logging.WARNING, _("warning")),
-        (logging.ERROR, _("error")),
-        (logging.CRITICAL, _("critical")),
-    )
-
-    group = models.UUIDField(_("group"), blank=True, null=True)
-
-    message = models.TextField(_("message"))
-
-    level = models.PositiveIntegerField(
-        _("level"),
-        choices=LEVELS,
-        default=logging.INFO,
-    )
-
-    created = models.DateTimeField(_("created"), auto_now_add=True)
-
-    class Meta:
-        ordering = ("-created",)
-        verbose_name = _("log")
-        verbose_name_plural = _("logs")
-
-    def __str__(self):
-        return self.message
+        tags_to_add = self.tags.model.objects.filter(id__in=tag_ids)
+        self.tags.add(*tags_to_add)
 
 
 class SavedView(ModelWithOwner):
@@ -522,6 +545,11 @@ class SavedViewFilterRule(models.Model):
         (40, _("does not have custom field in")),
         (41, _("does not have custom field")),
         (42, _("custom fields query")),
+        (43, _("created to")),
+        (44, _("created from")),
+        (45, _("added to")),
+        (46, _("added from")),
+        (47, _("mime type is")),
     ]
 
     saved_view = models.ForeignKey(
@@ -543,91 +571,6 @@ class SavedViewFilterRule(models.Model):
         return f"SavedViewFilterRule: {self.rule_type} : {self.value}"
 
 
-# TODO: why is this in the models file?
-# TODO: how about, what is this and where is it documented?
-# It appears to parsing JSON from an environment variable to get a title and date from
-# the filename, if possible, as a higher priority than either document filename or
-# content parsing
-class FileInfo:
-    REGEXES = OrderedDict(
-        [
-            (
-                "created-title",
-                re.compile(
-                    r"^(?P<created>\d{8}(\d{6})?Z) - (?P<title>.*)$",
-                    flags=re.IGNORECASE,
-                ),
-            ),
-            ("title", re.compile(r"(?P<title>.*)$", flags=re.IGNORECASE)),
-        ],
-    )
-
-    def __init__(
-        self,
-        created=None,
-        correspondent=None,
-        title=None,
-        tags=(),
-        extension=None,
-    ):
-        self.created = created
-        self.title = title
-        self.extension = extension
-        self.correspondent = correspondent
-        self.tags = tags
-
-    @classmethod
-    def _get_created(cls, created):
-        try:
-            return dateutil.parser.parse(f"{created[:-1]:0<14}Z")
-        except ValueError:
-            return None
-
-    @classmethod
-    def _get_title(cls, title):
-        return title
-
-    @classmethod
-    def _mangle_property(cls, properties, name):
-        if name in properties:
-            properties[name] = getattr(cls, f"_get_{name}")(properties[name])
-
-    @classmethod
-    def from_filename(cls, filename) -> "FileInfo":
-        # Mutate filename in-place before parsing its components
-        # by applying at most one of the configured transformations.
-        for pattern, repl in settings.FILENAME_PARSE_TRANSFORMS:
-            (filename, count) = pattern.subn(repl, filename)
-            if count:
-                break
-
-        # do this after the transforms so that the transforms can do whatever
-        # with the file extension.
-        filename_no_ext = os.path.splitext(filename)[0]
-
-        if filename_no_ext == filename and filename.startswith("."):
-            # This is a very special case where there is no text before the
-            # file type.
-            # TODO: this should be handled better. The ext is not removed
-            #  because usually, files like '.pdf' are just hidden files
-            #  with the name pdf, but in our case, its more likely that
-            #  there's just no name to begin with.
-            filename = ""
-            # This isn't too bad either, since we'll just not match anything
-            # and return an empty title. TODO: actually, this is kinda bad.
-        else:
-            filename = filename_no_ext
-
-        # Parse filename components.
-        for regex in cls.REGEXES.values():
-            m = regex.match(filename)
-            if m:
-                properties = m.groupdict()
-                cls._mangle_property(properties, "created")
-                cls._mangle_property(properties, "title")
-                return cls(**properties)
-
-
 # Extending User Model Using a One-To-One Link
 class UiSettings(models.Model):
     user = models.OneToOneField(
@@ -644,6 +587,17 @@ class UiSettings(models.Model):
 class PaperlessTask(ModelWithOwner):
     ALL_STATES = sorted(states.ALL_STATES)
     TASK_STATE_CHOICES = sorted(zip(ALL_STATES, ALL_STATES))
+
+    class TaskType(models.TextChoices):
+        AUTO = ("auto_task", _("Auto Task"))
+        SCHEDULED_TASK = ("scheduled_task", _("Scheduled Task"))
+        MANUAL_TASK = ("manual_task", _("Manual Task"))
+
+    class TaskName(models.TextChoices):
+        CONSUME_FILE = ("consume_file", _("Consume File"))
+        TRAIN_CLASSIFIER = ("train_classifier", _("Train Classifier"))
+        CHECK_SANITY = ("check_sanity", _("Check Sanity"))
+        INDEX_OPTIMIZE = ("index_optimize", _("Index Optimize"))
 
     task_id = models.CharField(
         max_length=255,
@@ -668,8 +622,9 @@ class PaperlessTask(ModelWithOwner):
     task_name = models.CharField(
         null=True,
         max_length=255,
+        choices=TaskName.choices,
         verbose_name=_("Task Name"),
-        help_text=_("Name of the Task which was run"),
+        help_text=_("Name of the task that was run"),
     )
 
     status = models.CharField(
@@ -679,24 +634,28 @@ class PaperlessTask(ModelWithOwner):
         verbose_name=_("Task State"),
         help_text=_("Current state of the task being run"),
     )
+
     date_created = models.DateTimeField(
         null=True,
         default=timezone.now,
         verbose_name=_("Created DateTime"),
         help_text=_("Datetime field when the task result was created in UTC"),
     )
+
     date_started = models.DateTimeField(
         null=True,
         default=None,
         verbose_name=_("Started DateTime"),
         help_text=_("Datetime field when the task was started in UTC"),
     )
+
     date_done = models.DateTimeField(
         null=True,
         default=None,
         verbose_name=_("Completed DateTime"),
         help_text=_("Datetime field when the task was completed in UTC"),
     )
+
     result = models.TextField(
         null=True,
         default=None,
@@ -704,6 +663,14 @@ class PaperlessTask(ModelWithOwner):
         help_text=_(
             "The data returned by the task",
         ),
+    )
+
+    type = models.CharField(
+        max_length=30,
+        choices=TaskType.choices,
+        default=TaskType.AUTO,
+        verbose_name=_("Task Type"),
+        help_text=_("The type of task that was run"),
     )
 
     def __str__(self) -> str:
@@ -825,6 +792,7 @@ class CustomField(models.Model):
         MONETARY = ("monetary", _("Monetary"))
         DOCUMENTLINK = ("documentlink", _("Document Link"))
         SELECT = ("select", _("Select"))
+        LONG_TEXT = ("longtext", _("Long Text"))
 
     created = models.DateTimeField(
         _("created"),
@@ -882,6 +850,7 @@ class CustomFieldInstance(SoftDeleteModel):
         CustomField.FieldDataType.MONETARY: "value_monetary",
         CustomField.FieldDataType.DOCUMENTLINK: "value_document_ids",
         CustomField.FieldDataType.SELECT: "value_select",
+        CustomField.FieldDataType.LONG_TEXT: "value_long_text",
     }
 
     created = models.DateTimeField(
@@ -948,6 +917,8 @@ class CustomFieldInstance(SoftDeleteModel):
     value_document_ids = models.JSONField(null=True)
 
     value_select = models.CharField(null=True, max_length=16)
+
+    value_long_text = models.TextField(null=True)
 
     class Meta:
         ordering = ("created",)
@@ -1026,6 +997,7 @@ class WorkflowTrigger(models.Model):
         CONSUME_FOLDER = DocumentSource.ConsumeFolder.value, _("Consume Folder")
         API_UPLOAD = DocumentSource.ApiUpload.value, _("Api Upload")
         MAIL_FETCH = DocumentSource.MailFetch.value, _("Mail Fetch")
+        WEB_UI = DocumentSource.WebUI.value, _("Web UI")
 
     class ScheduleDateField(models.TextChoices):
         ADDED = "added", _("Added")
@@ -1040,9 +1012,9 @@ class WorkflowTrigger(models.Model):
     )
 
     sources = MultiSelectField(
-        max_length=5,
+        max_length=7,
         choices=DocumentSourceChoices.choices,
-        default=f"{DocumentSource.ConsumeFolder},{DocumentSource.ApiUpload},{DocumentSource.MailFetch}",
+        default=f"{DocumentSource.ConsumeFolder},{DocumentSource.ApiUpload},{DocumentSource.MailFetch},{DocumentSource.WebUI}",
     )
 
     filter_path = models.CharField(
@@ -1093,12 +1065,33 @@ class WorkflowTrigger(models.Model):
         verbose_name=_("has these tag(s)"),
     )
 
+    filter_has_all_tags = models.ManyToManyField(
+        Tag,
+        blank=True,
+        related_name="workflowtriggers_has_all",
+        verbose_name=_("has all of these tag(s)"),
+    )
+
+    filter_has_not_tags = models.ManyToManyField(
+        Tag,
+        blank=True,
+        related_name="workflowtriggers_has_not",
+        verbose_name=_("does not have these tag(s)"),
+    )
+
     filter_has_document_type = models.ForeignKey(
         DocumentType,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
         verbose_name=_("has this document type"),
+    )
+
+    filter_has_not_document_types = models.ManyToManyField(
+        DocumentType,
+        blank=True,
+        related_name="workflowtriggers_has_not_document_type",
+        verbose_name=_("does not have these document type(s)"),
     )
 
     filter_has_correspondent = models.ForeignKey(
@@ -1109,7 +1102,36 @@ class WorkflowTrigger(models.Model):
         verbose_name=_("has this correspondent"),
     )
 
-    schedule_offset_days = models.PositiveIntegerField(
+    filter_has_not_correspondents = models.ManyToManyField(
+        Correspondent,
+        blank=True,
+        related_name="workflowtriggers_has_not_correspondent",
+        verbose_name=_("does not have these correspondent(s)"),
+    )
+
+    filter_has_storage_path = models.ForeignKey(
+        StoragePath,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        verbose_name=_("has this storage path"),
+    )
+
+    filter_has_not_storage_paths = models.ManyToManyField(
+        StoragePath,
+        blank=True,
+        related_name="workflowtriggers_has_not_storage_path",
+        verbose_name=_("does not have these storage path(s)"),
+    )
+
+    filter_custom_field_query = models.TextField(
+        _("filter custom field query"),
+        null=True,
+        blank=True,
+        help_text=_("JSON-encoded custom field query expression."),
+    )
+
+    schedule_offset_days = models.IntegerField(
         _("schedule offset days"),
         default=0,
         help_text=_(
@@ -1198,15 +1220,23 @@ class WorkflowActionEmail(models.Model):
 
 
 class WorkflowActionWebhook(models.Model):
-    url = models.URLField(
+    # We dont use the built-in URLField because it is not flexible enough
+    # validation is handled in the serializer
+    url = models.CharField(
         _("webhook url"),
         null=False,
+        max_length=256,
         help_text=_("The destination URL for the notification."),
     )
 
     use_params = models.BooleanField(
         default=True,
         verbose_name=_("use parameters"),
+    )
+
+    as_json = models.BooleanField(
+        default=False,
+        verbose_name=_("send as JSON"),
     )
 
     params = models.JSONField(
@@ -1264,14 +1294,12 @@ class WorkflowAction(models.Model):
         default=WorkflowActionType.ASSIGNMENT,
     )
 
-    assign_title = models.CharField(
+    assign_title = models.TextField(
         _("assign title"),
-        max_length=256,
         null=True,
         blank=True,
         help_text=_(
-            "Assign a document title, can include some placeholders, "
-            "see documentation.",
+            "Assign a document title, must  be a Jinja2 template, see documentation.",
         ),
     )
 
@@ -1351,6 +1379,16 @@ class WorkflowAction(models.Model):
         blank=True,
         related_name="+",
         verbose_name=_("assign these custom fields"),
+    )
+
+    assign_custom_fields_values = models.JSONField(
+        _("custom field values"),
+        null=True,
+        blank=True,
+        help_text=_(
+            "Optional values to assign to the custom fields.",
+        ),
+        default=dict,
     )
 
     remove_tags = models.ManyToManyField(
@@ -1509,7 +1547,7 @@ class Workflow(models.Model):
         return f"Workflow: {self.name}"
 
 
-class WorkflowRun(models.Model):
+class WorkflowRun(SoftDeleteModel):
     workflow = models.ForeignKey(
         Workflow,
         on_delete=models.CASCADE,

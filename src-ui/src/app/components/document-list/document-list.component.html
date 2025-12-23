@@ -1,17 +1,37 @@
 <pngx-page-header [title]="getTitle()">
-
-  <div ngbDropdown class="d-flex">
-    <button class="btn btn-sm btn-outline-primary" id="dropdownSelect" ngbDropdownToggle>
+  <div ngbDropdown class="btn-group flex-fill d-sm-none">
+    <button class="btn btn-sm btn-outline-primary" id="dropdownSelectMobile" ngbDropdownToggle>
       <i-bs name="text-indent-left"></i-bs>
       <div class="d-none d-sm-inline">&nbsp;<ng-container i18n>Select</ng-container></div>
+      @if (list.selected.size > 0) {
+        <pngx-clearable-badge [selected]="list.selected.size > 0" [number]="list.selected.size" (cleared)="list.selectNone()"></pngx-clearable-badge><span class="visually-hidden">selected</span>
+      }
     </button>
-    <div ngbDropdownMenu aria-labelledby="dropdownSelect" class="shadow">
+    <div ngbDropdownMenu aria-labelledby="dropdownSelectMobile" class="shadow">
       <button ngbDropdownItem (click)="list.selectNone()" i18n>Select none</button>
       <button ngbDropdownItem (click)="list.selectPage()" i18n>Select page</button>
       <button ngbDropdownItem (click)="list.selectAll()" i18n>Select all</button>
     </div>
   </div>
-  <div ngbDropdown class="d-flex">
+  <div class="d-none d-sm-flex flex-fill me-3">
+    <div class="input-group input-group-sm">
+      <span class="input-group-text border-0" i18n>Select:</span>
+    </div>
+    <div class="btn-group btn-group-sm flex-nowrap">
+      @if (list.selected.size > 0) {
+        <button class="btn btn-sm btn-outline-secondary" (click)="list.selectNone()">
+          <i-bs name="slash-circle"></i-bs>&nbsp;<ng-container i18n>None</ng-container>
+        </button>
+      }
+      <button class="btn btn-sm btn-outline-primary" (click)="list.selectPage()">
+        <i-bs name="file-earmark-check"></i-bs>&nbsp;<ng-container i18n>Page</ng-container>
+      </button>
+      <button class="btn btn-sm btn-outline-primary" (click)="list.selectAll()">
+        <i-bs name="check-all"></i-bs>&nbsp;<ng-container i18n>All</ng-container>
+      </button>
+    </div>
+  </div>
+  <div ngbDropdown class="btn-group flex-fill">
     <button class="btn btn-sm btn-outline-primary" id="dropdownDisplayFields" ngbDropdownToggle>
       <i-bs name="card-heading"></i-bs>
       <div class="d-none d-sm-inline">&nbsp;<ng-container i18n>Show</ng-container></div>
@@ -43,7 +63,10 @@
   </div>
 
   <div ngbDropdown class="btn-group flex-fill">
-    <button class="btn btn-outline-primary btn-sm" id="dropdownBasic1" ngbDropdownToggle i18n>Sort</button>
+    <button class="btn btn-outline-primary btn-sm" id="dropdownBasic1" ngbDropdownToggle>
+      <i-bs name="arrow-down-up"></i-bs>
+      <div class="d-none d-sm-inline">&nbsp;<ng-container i18n>Sort</ng-container></div>
+    </button>
     <div ngbDropdownMenu aria-labelledby="dropdownBasic1" class="shadow dropdown-menu-right">
       <div class="w-100 d-flex pb-2 mb-1 border-bottom">
         <input type="radio" class="btn-check" [value]="false" [(ngModel)]="listSortReverse" id="listSortReverseFalse">
@@ -67,7 +90,8 @@
 
   <div class="btn-group flex-fill" *pngxIfPermissions="{ action: PermissionAction.View, type: PermissionType.SavedView }" ngbDropdown role="group">
     <button class="btn btn-sm btn-outline-primary dropdown-toggle flex-fill" tourAnchor="tour.documents-views" ngbDropdownToggle>
-      <ng-container i18n>Views</ng-container>
+      <i-bs class="me-1" name="window-stack"></i-bs>
+      <div class="d-none d-sm-inline">&nbsp;<ng-container i18n>Views</ng-container></div>
       @if (savedViewIsModified) {
         <div class="position-absolute top-0 start-100 p-2 translate-middle badge bg-secondary border border-light rounded-circle">
           <span class="visually-hidden">selected</span>
@@ -122,8 +146,13 @@
       @if (!list.isReloading && isFiltered) {
         <button class="btn btn-link py-0" (click)="resetFilters()">
           <i-bs width="1em" height="1em" name="x"></i-bs><small i18n>Reset filters</small>
-          </button>
-        }
+        </button>
+      }
+      @if (!list.isReloading && list.selected.size > 0) {
+        <button class="btn btn-link py-0" (click)="list.selectNone()">
+          <i-bs width="1em" height="1em" name="slash-circle" class="me-1"></i-bs><small i18n>Clear selection</small>
+        </button>
+      }
       </div>
       @if (list.collectionSize) {
         <ngb-pagination [pageSize]="list.pageSize" [collectionSize]="list.collectionSize" [(page)]="list.currentPage" [maxSize]="5"
@@ -291,7 +320,7 @@
                 @if (activeDisplayFields.includes(DisplayField.CORRESPONDENT) && permissionService.currentUserCan(PermissionAction.View, PermissionType.Correspondent)) {
                   <td class="">
                     @if (d.correspondent) {
-                      <a (click)="clickCorrespondent(d.correspondent);$event.stopPropagation()" title="Filter by correspondent" i18n-title>{{(d.correspondent$ | async)?.name}}</a>
+                      <a (click)="clickCorrespondent(d.correspondent);$event.stopPropagation()" title="Filter by correspondent" i18n-title>{{d.correspondent | correspondentName | async}}</a>
                     }
                   </td>
                 }
@@ -306,15 +335,15 @@
                       </div>
                     }
                     @if (activeDisplayFields.includes(DisplayField.TAGS)) {
-                      @for (t of d.tags$ | async; track t) {
-                        <pngx-tag [tag]="t" class="ms-1" clickable="true" linkTitle="Filter by tag" i18n-linkTitle (click)="clickTag(t.id);$event.stopPropagation()"></pngx-tag>
+                      @for (tagID of d.tags; track tagID) {
+                        <pngx-tag [tagID]="tagID" class="ms-1 fs-6" clickable="true" linkTitle="Filter by tag" i18n-linkTitle (click)="clickTag(tagID);$event.stopPropagation()"></pngx-tag>
                       }
                     }
                   </td>
                 }
                 @if (activeDisplayFields.includes(DisplayField.OWNER) && permissionService.currentUserCan(PermissionAction.View, PermissionType.User)) {
                   <td>
-                    {{d.owner | username}}
+                    {{d.owner | username | async}}
                   </td>
                 }
                 @if (activeDisplayFields.includes(DisplayField.NOTES) && notesEnabled) {
@@ -331,20 +360,20 @@
                 @if (activeDisplayFields.includes(DisplayField.DOCUMENT_TYPE) && permissionService.currentUserCan(PermissionAction.View, PermissionType.DocumentType)) {
                   <td class="">
                     @if (d.document_type) {
-                      <a (click)="clickDocumentType(d.document_type);$event.stopPropagation()" title="Filter by document type" i18n-title>{{(d.document_type$ | async)?.name}}</a>
+                      <a (click)="clickDocumentType(d.document_type);$event.stopPropagation()" title="Filter by document type" i18n-title>{{d.document_type | documentTypeName | async}}</a>
                     }
                   </td>
                 }
                 @if (activeDisplayFields.includes(DisplayField.STORAGE_PATH) && permissionService.currentUserCan(PermissionAction.View, PermissionType.StoragePath)) {
                   <td class="">
                     @if (d.storage_path) {
-                      <a (click)="clickStoragePath(d.storage_path);$event.stopPropagation()" title="Filter by storage path" i18n-title>{{(d.storage_path$ | async)?.name}}</a>
+                      <a (click)="clickStoragePath(d.storage_path);$event.stopPropagation()" title="Filter by storage path" i18n-title>{{d.storage_path | storagePathName | async}}</a>
                     }
                   </td>
                 }
                 @if (activeDisplayFields.includes(DisplayField.CREATED)) {
                   <td>
-                    {{d.created_date | customDate}}
+                    {{d.created | customDate}}
                   </td>
                 }
                 @if (activeDisplayFields.includes(DisplayField.ADDED)) {
@@ -353,10 +382,10 @@
                   </td>
                 }
                 @if (activeDisplayFields.includes(DisplayField.PAGE_COUNT)) {
-                    <td>
-                        {{ d.page_count }}
-                    </td>
-                  }
+                  <td>
+                      {{ d.page_count }}
+                  </td>
+                }
                 @if (activeDisplayFields.includes(DisplayField.SHARED)) {
                   <td>
                     @if (d.is_shared_by_requester) { <ng-container i18n>Yes</ng-container> } @else { <ng-container i18n>No</ng-container> }

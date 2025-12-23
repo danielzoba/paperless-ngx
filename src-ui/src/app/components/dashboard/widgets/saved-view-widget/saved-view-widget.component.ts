@@ -1,6 +1,7 @@
 import { AsyncPipe, NgClass, NgStyle } from '@angular/common'
 import {
   Component,
+  inject,
   Input,
   OnDestroy,
   OnInit,
@@ -11,6 +12,7 @@ import { Router, RouterModule } from '@angular/router'
 import { NgbPopover } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { delay, Subject, takeUntil, tap } from 'rxjs'
+import { CustomFieldDisplayComponent } from 'src/app/components/common/custom-field-display/custom-field-display.component'
 import { PreviewPopupComponent } from 'src/app/components/common/preview-popup/preview-popup.component'
 import { TagComponent } from 'src/app/components/common/tag/tag.component'
 import { DocumentCardLargeComponent } from 'src/app/components/document-list/document-card-large/document-card-large.component'
@@ -30,13 +32,17 @@ import {
   FILTER_DOCUMENT_TYPE,
   FILTER_FULLTEXT_MORELIKE,
   FILTER_HAS_TAGS_ALL,
+  FILTER_OWNER_ANY,
   FILTER_STORAGE_PATH,
 } from 'src/app/data/filter-rule-type'
 import { SavedView } from 'src/app/data/saved-view'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
+import { CorrespondentNamePipe } from 'src/app/pipes/correspondent-name.pipe'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
-import { ConsumerStatusService } from 'src/app/services/consumer-status.service'
+import { DocumentTypeNamePipe } from 'src/app/pipes/document-type-name.pipe'
+import { StoragePathNamePipe } from 'src/app/pipes/storage-path-name.pipe'
+import { UsernamePipe } from 'src/app/pipes/username.pipe'
 import { DocumentListViewService } from 'src/app/services/document-list-view.service'
 import { OpenDocumentsService } from 'src/app/services/open-documents.service'
 import {
@@ -46,7 +52,9 @@ import {
 } from 'src/app/services/permissions.service'
 import { CustomFieldsService } from 'src/app/services/rest/custom-fields.service'
 import { DocumentService } from 'src/app/services/rest/document.service'
+import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { SettingsService } from 'src/app/services/settings.service'
+import { WebsocketStatusService } from 'src/app/services/websocket-status.service'
 import { WidgetFrameComponent } from '../widget-frame/widget-frame.component'
 
 @Component({
@@ -54,12 +62,17 @@ import { WidgetFrameComponent } from '../widget-frame/widget-frame.component'
   templateUrl: './saved-view-widget.component.html',
   styleUrls: ['./saved-view-widget.component.scss'],
   imports: [
+    CustomFieldDisplayComponent,
     DocumentCardSmallComponent,
     DocumentCardLargeComponent,
     PreviewPopupComponent,
     TagComponent,
     WidgetFrameComponent,
     IfPermissionsDirective,
+    UsernamePipe,
+    CorrespondentNamePipe,
+    DocumentTypeNamePipe,
+    StoragePathNamePipe,
     AsyncPipe,
     DocumentTitlePipe,
     CustomDatePipe,
@@ -73,25 +86,22 @@ export class SavedViewWidgetComponent
   extends LoadingComponentWithPermissions
   implements OnInit, OnDestroy
 {
+  private documentService = inject(DocumentService)
+  private router = inject(Router)
+  private list = inject(DocumentListViewService)
+  private websocketStatusService = inject(WebsocketStatusService)
+  openDocumentsService = inject(OpenDocumentsService)
+  documentListViewService = inject(DocumentListViewService)
+  permissionsService = inject(PermissionsService)
+  private settingsService = inject(SettingsService)
+  private customFieldService = inject(CustomFieldsService)
+  private savedViewService = inject(SavedViewService)
+
   public DisplayMode = DisplayMode
   public DisplayField = DisplayField
   public CustomFieldDataType = CustomFieldDataType
 
   private customFields: CustomField[] = []
-
-  constructor(
-    private documentService: DocumentService,
-    private router: Router,
-    private list: DocumentListViewService,
-    private consumerStatusService: ConsumerStatusService,
-    public openDocumentsService: OpenDocumentsService,
-    public documentListViewService: DocumentListViewService,
-    public permissionsService: PermissionsService,
-    private settingsService: SettingsService,
-    private customFieldService: CustomFieldsService
-  ) {
-    super()
-  }
 
   @Input()
   savedView: SavedView
@@ -110,10 +120,12 @@ export class SavedViewWidgetComponent
 
   displayFields: DisplayField[] = DEFAULT_DASHBOARD_DISPLAY_FIELDS
 
+  count: number
+
   ngOnInit(): void {
     this.reload()
     this.displayMode = this.savedView.display_mode ?? DisplayMode.TABLE
-    this.consumerStatusService
+    this.websocketStatusService
       .onDocumentConsumptionFinished()
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(() => {
@@ -134,7 +146,10 @@ export class SavedViewWidgetComponent
         })
     }
 
-    if (this.savedView.display_fields) {
+    if (
+      this.savedView.display_fields &&
+      this.savedView.display_fields.length > 0
+    ) {
       this.displayFields = this.savedView.display_fields
     }
 
@@ -167,6 +182,8 @@ export class SavedViewWidgetComponent
         tap((result) => {
           this.show = true
           this.documents = result.results
+          this.count = result.count
+          this.savedViewService.setDocumentCount(this.savedView, result.count)
         }),
         delay(500)
       )
@@ -224,6 +241,15 @@ export class SavedViewWidgetComponent
   clickMoreLike(documentID: number) {
     this.list.quickFilter([
       { rule_type: FILTER_FULLTEXT_MORELIKE, value: documentID.toString() },
+    ])
+  }
+
+  clickOwner(ownerID: number, event: MouseEvent = null) {
+    event?.preventDefault()
+    event?.stopImmediatePropagation()
+
+    this.list.quickFilter([
+      { rule_type: FILTER_OWNER_ANY, value: ownerID.toString() },
     ])
   }
 

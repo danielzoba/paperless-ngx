@@ -67,10 +67,10 @@ class TestUrlCanary:
         whether this image stays online forever, so here we check if we can detect if is not
         available anymore.
         """
+        resp = httpx.get(
+            "https://docs.paperless-ngx.com/assets/non-existent.png",
+        )
         with pytest.raises(httpx.HTTPStatusError) as exec_info:
-            resp = httpx.get(
-                "https://upload.wikimedia.org/wikipedia/en/f/f7/nonexistent.png",
-            )
             resp.raise_for_status()
 
         assert exec_info.value.response.status_code == httpx.codes.NOT_FOUND
@@ -90,7 +90,9 @@ class TestUrlCanary:
         """
 
         # Now check the URL used in samples/sample.html
-        resp = httpx.get("https://upload.wikimedia.org/wikipedia/en/f/f7/RickRoll.png")
+        resp = httpx.get(
+            "https://docs.paperless-ngx.com/assets/logo_full_white.svg",
+        )
         resp.raise_for_status()
 
 
@@ -129,9 +131,11 @@ class TestParserLive:
         assert thumb.exists()
         assert thumb.is_file()
 
-        assert (
-            self.imagehash(thumb) == self.imagehash(simple_txt_email_thumbnail_file)
-        ), f"Created Thumbnail {thumb} differs from expected file {simple_txt_email_thumbnail_file}"
+        assert self.imagehash(thumb) == self.imagehash(
+            simple_txt_email_thumbnail_file,
+        ), (
+            f"Created Thumbnail {thumb} differs from expected file {simple_txt_email_thumbnail_file}"
+        )
 
     def test_tika_parse_successful(self, mail_parser: MailDocumentParser):
         """
@@ -226,6 +230,6 @@ class TestParserLive:
         # The created pdf is not reproducible. But the converted image should always look the same.
         expected_hash = self.imagehash(html_email_thumbnail_file)
 
-        assert (
-            generated_thumbnail_hash == expected_hash
-        ), f"PDF looks different. Check if {generated_thumbnail} looks weird."
+        assert generated_thumbnail_hash == expected_hash, (
+            f"PDF looks different. Check if {generated_thumbnail} looks weird."
+        )

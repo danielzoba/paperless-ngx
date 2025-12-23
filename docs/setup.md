@@ -2,10 +2,10 @@
 
 You can go multiple routes to setup and run Paperless:
 
--   [Use the easy install docker script](#docker_script)
--   [Pull the image from Docker Hub](#docker_hub)
+-   [Use the script to setup a Docker install](#docker_script)
+-   [Use the Docker compose templates](#docker)
 -   [Build the Docker image yourself](#docker_build)
--   [Install Paperless directly on your system manually (bare metal)](#bare_metal)
+-   [Install Paperless-ngx directly on your system manually ("bare metal")](#bare_metal)
 -   A user-maintained list of commercial hosting providers can be found [in the wiki](https://github.com/paperless-ngx/paperless-ngx/wiki/Related-Projects)
 
 The Docker routes are quick & easy. These are the recommended routes.
@@ -18,107 +18,65 @@ The bare metal route is complicated to setup but makes it easier should
 you want to contribute some code back. You need to configure and run the
 above mentioned components yourself.
 
-### Docker using the Installation Script {#docker_script}
+### Use the Installation Script {#docker_script}
 
-Paperless provides an interactive installation script. This script will
-ask you for a couple configuration options, download and create the
-necessary configuration files, pull the docker image, start paperless
-and create your user account. This script essentially performs all the
-steps described in [Docker setup](#docker_hub) automatically.
+Paperless provides an interactive installation script to setup a Docker Compose
+installation. The script asks for a couple configuration options, and will then create the
+necessary configuration files, pull the docker image, start Paperless-ngx and create your superuser
+account. The script essentially automatically performs the steps described in [Docker setup](#docker).
 
-1.  Make sure that Docker and Docker Compose are installed.
-
-    !!! tip
-
-        See the Docker installation instructions at https://docs.docker.com/engine/install/
+1.  Make sure that Docker and Docker Compose are [installed](https://docs.docker.com/engine/install/){:target="\_blank"}.
 
 2.  Download and run the installation script:
 
     ```shell-session
-    $ bash -c "$(curl --location --silent --show-error https://raw.githubusercontent.com/paperless-ngx/paperless-ngx/main/install-paperless-ngx.sh)"
+    bash -c "$(curl --location --silent --show-error https://raw.githubusercontent.com/paperless-ngx/paperless-ngx/main/install-paperless-ngx.sh)"
     ```
 
     !!! note
 
-        macOS users will need to install e.g. [gnu-sed](https://formulae.brew.sh/formula/gnu-sed) with support
-        for running as `sed`.
+        macOS users will need to install [gnu-sed](https://formulae.brew.sh/formula/gnu-sed) with support
+        for running as `sed` as well as [wget](https://formulae.brew.sh/formula/wget).
 
-### From GHCR / Docker Hub {#docker_hub}
+### Use Docker Compose {#docker}
 
-1.  Login with your user and create a folder in your home-directory to have a place for your
-    configuration files and consumption directory.
-
-    ```shell-session
-    $ mkdir -v ~/paperless-ngx
-    ```
+1.  Make sure that Docker and Docker Compose are [installed](https://docs.docker.com/engine/install/){:target="\_blank"}.
 
 2.  Go to the [/docker/compose directory on the project
-    page](https://github.com/paperless-ngx/paperless-ngx/tree/main/docker/compose)
-    and download one of the `docker-compose.*.yml` files,
-    depending on which database backend you want to use. Rename this
-    file to `docker-compose.yml`. If you want to enable
-    optional support for Office documents, download a file with
-    `-tika` in the file name. Download the
-    `docker-compose.env` file and the `.env` file as well and store them
-    in the same directory.
+    page](https://github.com/paperless-ngx/paperless-ngx/tree/main/docker/compose){:target="\_blank"}
+    and download one of the `docker-compose.*.yml` files, depending on which database backend
+    you want to use. Place the files in a local directory and rename it `docker-compose.yml`. Download the
+    `docker-compose.env` file and the `.env` file as well in the same directory.
+
+    If you want to enable optional support for Office and other documents, download a
+    file with `-tika` in the file name.
 
     !!! tip
 
         For new installations, it is recommended to use PostgreSQL as the
         database backend.
 
-3.  Install [Docker](https://docs.docker.com/engine/install/) and
-    [Docker Compose](https://docs.docker.com/compose/install/).
-
-    !!! warning
-
-        If you want to use the included `docker-compose.*.yml` file, you
-        need to have at least Docker version **17.09.0** and Docker Compose
-        version **v2**. To check do: `docker compose version` or `docker -v`
-
-        See the [Docker installation guide](https://docs.docker.com/engine/install/) on how to install the current
-        version of Docker for your operating system or Linux distribution of
-        choice. To get the latest version of Docker Compose, follow the
-        [Docker Compose installation guide](https://docs.docker.com/compose/install/linux/) if your package repository
-        doesn't include it.
-
-4.  Modify `docker-compose.yml` to your preferences. You may want to
-    change the path to the consumption directory. Find the line that
-    specifies where to mount the consumption directory:
+3.  Modify `docker-compose.yml` as needed. For example, you may want to change the paths to the
+    consumption, media etc. directories to use 'bind mounts'.
+    Find the line that specifies where to mount the directory, e.g.:
 
     ```yaml
     - ./consume:/usr/src/paperless/consume
     ```
 
-    Replace the part BEFORE the colon with a local directory of your
-    choice:
+    Replace the part _before_ the colon with a local directory of your choice:
 
     ```yaml
     - /home/jonaswinkler/paperless-inbox:/usr/src/paperless/consume
     ```
 
-    Don't change the part after the colon or paperless won't find your
-    documents.
-
-    You may also need to change the default port that the webserver will
-    use from the default (8000):
-
-    ```yaml
-    ports:
-        - 8000:8000
-    ```
-
-    Replace the part BEFORE the colon with a port of your choice:
+    You may also want to change the default port that the webserver will
+    use from the default (8000) to something else, e.g. for port 8010:
 
     ```yaml
     ports:
         - 8010:8000
     ```
-
-    Don't change the part after the colon or edit other lines that
-    refer to port 8000. Modifying the part before the colon will map
-    requests on another port to the webserver running on the default
-    port.
 
     **Rootless**
 
@@ -143,21 +101,16 @@ steps described in [Docker setup](#docker_hub) automatically.
     >   user: <user_id>
     > ```
 
-5.  Modify `docker-compose.env`, following the comments in the file. The
-    most important change is to set `USERMAP_UID` and `USERMAP_GID` to
-    the uid and gid of your user on the host system. Use `id -u` and
-    `id -g` to get these.
+4.  Modify `docker-compose.env` with any configuration options you'd like.
+    See the [configuration documentation](configuration.md) for all options.
 
-    This ensures that both the docker container and you on the host
-    machine have write access to the consumption directory. If your UID
+    You may also need to set `USERMAP_UID` and `USERMAP_GID` to
+    the uid and gid of your user on the host system. Use `id -u` and
+    `id -g` to get these. This ensures that both the container and the host
+    user have write access to the consumption directory. If your UID
     and GID on the host system is 1000 (the default for the first normal
     user on most systems), it will work out of the box without any
-    modifications. `id "username"` to check.
-
-    !!! note
-
-        You can copy any setting from the file `paperless.conf.example` and
-        paste it here. Have a look at [configuration](configuration.md) to see what's available.
+    modifications. Run `id "username"` to check.
 
     !!! note
 
@@ -174,33 +127,15 @@ steps described in [Docker setup](#docker_hub) automatically.
         [`PAPERLESS_CONSUMER_POLLING`](configuration.md#PAPERLESS_CONSUMER_POLLING), which will disable inotify. See
         [here](configuration.md#polling).
 
-6.  Run `docker compose pull`. This will pull the image.
+5.  Run `docker compose pull`. This will pull the image from the GitHub container registry
+    by default but you can change the image to pull from Docker Hub by changing the `image`
+    line to `image: paperlessngx/paperless-ngx:latest`.
 
-7.  To be able to login, you will need a super user. To create it,
-    execute the following command:
+6.  Run `docker compose up -d`. This will create and start the necessary containers.
 
-    ```shell-session
-    $ docker compose run --rm webserver createsuperuser
-    ```
-
-    or using docker exec from within the container:
-
-    ```shell-session
-    $ python3 manage.py createsuperuser
-    ```
-
-    This will prompt you to set a username, an optional e-mail address
-    and finally a password (at least 8 characters).
-
-8.  Run `docker compose up -d`. This will create and start the necessary containers.
-
-9.  The default `docker-compose.yml` exports the webserver on your local
-    port
-
-    8000\. If you did not change this, you should now be able to visit
-    your Paperless instance at `http://127.0.0.1:8000` or your servers
-    IP-Address:8000. Use the login credentials you have created with the
-    previous step.
+7.  Congratulations! Your Paperless-ngx instance should now be accessible at `http://127.0.0.1:8000`
+    (or similar, depending on your configuration). When you first access the web interface, you will be
+    prompted to create a superuser account.
 
 ### Build the Docker image yourself {#docker_build}
 
@@ -234,11 +169,11 @@ steps described in [Docker setup](#docker_hub) automatically.
             context: .
     ```
 
-4.  Follow steps 3 to 8 of [Docker Setup](#docker_hub). When asked to run
-    `docker compose pull` to pull the image, do
+4.  Follow the [Docker setup](#docker) above except when asked to run
+    `docker compose pull` to pull the image, run
 
     ```shell-session
-    $ docker compose build
+    docker compose build
     ```
 
     instead to build the image.
@@ -391,7 +326,7 @@ are released, dependency support is confirmed, etc.
 
     !!! warning
 
-        Ensure your Redis instance [is secured](https://redis.io/docs/getting-started/#securing-redis).
+        Ensure your Redis instance [is secured](https://redis.io/docs/latest/operate/oss_and_stack/management/security/).
 
 7.  Create the following directories if they are missing:
 
@@ -430,15 +365,20 @@ are released, dependency support is confirmed, etc.
         dependencies.  This is an alternative to the above and may require adjusting
         the example scripts to utilize the virtual environment paths
 
-9.  Go to `/opt/paperless/src`, and execute the following commands:
+    !!! tip
+
+        If you use modern Python tooling, such as `uv`, installation will not include
+        dependencies for Postgres or Mariadb.  You can select those extras with `--extra <EXTRA>`
+        or all with `--all-extras`
+
+9.  Go to `/opt/paperless/src`, and execute the following command:
 
     ```bash
     # This creates the database schema.
     sudo -Hu paperless python3 manage.py migrate
-
-    # This creates your first paperless user
-    sudo -Hu paperless python3 manage.py createsuperuser
     ```
+
+    When you first access the web interface you will be prompted to create a superuser account.
 
 10. Optional: Test that paperless is working by executing
 
@@ -476,31 +416,20 @@ are released, dependency support is confirmed, etc.
 
     !!! note
 
-        The `socket` script enables `gunicorn` to run on port 80 without
+        The `socket` script enables `granian` to run on port 80 without
         root privileges. For this you need to uncomment the
         `Require=paperless-webserver.socket` in the `webserver` script
-        and configure `gunicorn` to listen on port 80 (see
-        `paperless/gunicorn.conf.py`).
-
-    You may need to adjust the path to the `gunicorn` executable. This
-    will be installed as part of the python dependencies, and is either
-    located in the `bin` folder of your virtual environment, or in
-    `~/.local/bin/` if no virtual environment is used.
+        and configure `granian` to listen on port 80 (set `GRANIAN_PORT`).
 
     These services rely on redis and optionally the database server, but
     don't need to be started in any particular order. The example files
     depend on redis being started. If you use a database server, you
     should add additional dependencies.
 
-    !!! warning
+    !!! note
 
-        The included scripts run a `gunicorn` standalone server, which is
-        fine for running paperless. It does support SSL, however, the
-        documentation of GUnicorn states that you should use a proxy server
-        in front of gunicorn instead.
-
-        For instructions on how to use nginx for that,
-        [see the wiki](https://github.com/paperless-ngx/paperless-ngx/wiki/Using-a-Reverse-Proxy-with-Paperless-ngx#nginx).
+        For instructions on using a reverse proxy,
+        [see the wiki](https://github.com/paperless-ngx/paperless-ngx/wiki/Using-a-Reverse-Proxy-with-Paperless-ngx#).
 
     !!! warning
 
@@ -516,7 +445,7 @@ are released, dependency support is confirmed, etc.
 13. Configure ImageMagick to allow processing of PDF documents. Most
     distributions have this disabled by default, since PDF documents can
     contain malware. If you don't do this, paperless will fall back to
-    ghostscript for certain steps such as thumbnail generation.
+    Ghostscript for certain steps such as thumbnail generation.
 
     Edit `/etc/ImageMagick-6/policy.xml` and adjust
 
@@ -607,8 +536,8 @@ Migration to paperless-ngx is then performed in a few simple steps:
 1.  Stop paperless.
 
     ```bash
-    $ cd /path/to/current/paperless
-    $ docker compose down
+    cd /path/to/current/paperless
+    docker compose down
     ```
 
 2.  Do a backup for two purposes: If something goes wrong, you still
@@ -632,7 +561,7 @@ Migration to paperless-ngx is then performed in a few simple steps:
         names of your volumes with
 
         ``` shell-session
-        $ docker volume ls | grep _data
+        docker volume ls | grep _data
         ```
 
         and adjust the project name in the `.env` file so that it matches
@@ -643,7 +572,7 @@ Migration to paperless-ngx is then performed in a few simple steps:
     after you migrated your existing SQLite database.
 
 5.  Adjust `docker-compose.yml` and `docker-compose.env` to your needs.
-    See [Docker setup](#docker_hub) details on
+    See [Docker setup](#docker) details on
     which edits are advised.
 
 6.  [Update paperless.](administration.md#updating)
@@ -653,7 +582,7 @@ Migration to paperless-ngx is then performed in a few simple steps:
     the search index:
 
     ```shell-session
-    $ docker compose run --rm webserver document_index reindex
+    docker compose run --rm webserver document_index reindex
     ```
 
     This will migrate your database and create the search index. After
@@ -662,7 +591,7 @@ Migration to paperless-ngx is then performed in a few simple steps:
 8.  Start paperless-ngx.
 
     ```bash
-    $ docker compose up -d
+    docker compose up -d
     ```
 
     This will run paperless in the background and automatically start it
@@ -763,7 +692,10 @@ Paperless runs on Raspberry Pi. However, some things are rather slow on
 the Pi and configuring some options in paperless can help improve
 performance immensely:
 
--   Stick with SQLite to save some resources.
+-   Stick with SQLite to save some resources. See [troubleshooting](troubleshooting.md#log-reports-creating-paperlesstask-failed)
+    if you encounter issues with SQLite locking.
+-   If you do not need the filesystem-based consumer, consider disabling it
+    entirely by setting [`PAPERLESS_CONSUMER_DISABLE`](configuration.md#PAPERLESS_CONSUMER_DISABLE) to `true`.
 -   Consider setting [`PAPERLESS_OCR_PAGES`](configuration.md#PAPERLESS_OCR_PAGES) to 1, so that paperless will
     only OCR the first page of your documents. In most cases, this page
     contains enough information to be able to find it.

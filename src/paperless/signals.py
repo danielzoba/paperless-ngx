@@ -30,3 +30,30 @@ def handle_failed_login(sender, credentials, request, **kwargs):
             log_output += f" from private IP `{client_ip}`."
 
     logger.info(log_output)
+
+
+def handle_social_account_updated(sender, request, sociallogin, **kwargs):
+    """
+    Handle the social account update signal.
+    """
+    from django.contrib.auth.models import Group
+
+    extra_data = sociallogin.account.extra_data or {}
+    social_account_groups = extra_data.get(
+        "groups",
+        [],
+    )  # pre-allauth 65.11.0 structure
+
+    if not social_account_groups:
+        # allauth 65.11.0+ nests claims under `userinfo`/`id_token`
+        social_account_groups = (
+            extra_data.get("userinfo", {}).get("groups")
+            or extra_data.get("id_token", {}).get("groups")
+            or []
+        )
+    if settings.SOCIAL_ACCOUNT_SYNC_GROUPS and social_account_groups is not None:
+        groups = Group.objects.filter(name__in=social_account_groups)
+        logger.debug(
+            f"Syncing groups for user `{sociallogin.user}`: {social_account_groups}",
+        )
+        sociallogin.user.groups.set(groups, clear=True)

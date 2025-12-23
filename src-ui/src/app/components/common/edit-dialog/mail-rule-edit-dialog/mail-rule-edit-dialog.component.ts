@@ -1,11 +1,10 @@
-import { Component } from '@angular/core'
+import { Component, inject } from '@angular/core'
 import {
   FormControl,
   FormGroup,
   FormsModule,
   ReactiveFormsModule,
 } from '@angular/forms'
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
 import { first } from 'rxjs'
 import { EditDialogComponent } from 'src/app/components/common/edit-dialog/edit-dialog.component'
 import { Correspondent } from 'src/app/data/correspondent'
@@ -18,6 +17,7 @@ import {
   MailMetadataTitleOption,
   MailRule,
   MailRuleConsumptionScope,
+  MailRulePdfLayout,
 } from 'src/app/data/mail-rule'
 import { CorrespondentService } from 'src/app/services/rest/correspondent.service'
 import { DocumentTypeService } from 'src/app/services/rest/document-type.service'
@@ -49,12 +49,35 @@ const CONSUMPTION_SCOPE_OPTIONS = [
     name: $localize`Only process attachments`,
   },
   {
-    id: MailRuleConsumptionScope.Email_Only,
+    id: MailRuleConsumptionScope.EmailOnly,
     name: $localize`Process message as .eml`,
   },
   {
     id: MailRuleConsumptionScope.Everything,
     name: $localize`Process message as .eml and attachments separately`,
+  },
+]
+
+const PDF_LAYOUT_OPTIONS = [
+  {
+    id: MailRulePdfLayout.Default,
+    name: $localize`System default`,
+  },
+  {
+    id: MailRulePdfLayout.TextHtml,
+    name: $localize`Text, then HTML`,
+  },
+  {
+    id: MailRulePdfLayout.HtmlText,
+    name: $localize`HTML, then text`,
+  },
+  {
+    id: MailRulePdfLayout.HtmlOnly,
+    name: $localize`HTML only`,
+  },
+  {
+    id: MailRulePdfLayout.TextOnly,
+    name: $localize`Text only`,
   },
 ]
 
@@ -131,32 +154,34 @@ const METADATA_CORRESPONDENT_OPTIONS = [
   ],
 })
 export class MailRuleEditDialogComponent extends EditDialogComponent<MailRule> {
+  private accountService: MailAccountService
+  private correspondentService: CorrespondentService
+  private documentTypeService: DocumentTypeService
+
   accounts: MailAccount[]
   correspondents: Correspondent[]
   documentTypes: DocumentType[]
 
-  constructor(
-    service: MailRuleService,
-    activeModal: NgbActiveModal,
-    accountService: MailAccountService,
-    correspondentService: CorrespondentService,
-    documentTypeService: DocumentTypeService,
-    userService: UserService,
-    settingsService: SettingsService
-  ) {
-    super(service, activeModal, userService, settingsService)
+  constructor() {
+    super()
+    this.service = inject(MailRuleService)
+    this.accountService = inject(MailAccountService)
+    this.correspondentService = inject(CorrespondentService)
+    this.documentTypeService = inject(DocumentTypeService)
+    this.userService = inject(UserService)
+    this.settingsService = inject(SettingsService)
 
-    accountService
+    this.accountService
       .listAll()
       .pipe(first())
       .subscribe((result) => (this.accounts = result.results))
 
-    correspondentService
+    this.correspondentService
       .listAll()
       .pipe(first())
       .subscribe((result) => (this.correspondents = result.results))
 
-    documentTypeService
+    this.documentTypeService
       .listAll()
       .pipe(first())
       .subscribe((result) => (this.documentTypes = result.results))
@@ -184,6 +209,7 @@ export class MailRuleEditDialogComponent extends EditDialogComponent<MailRule> {
       filter_attachment_filename_exclude: new FormControl(null),
       maximum_age: new FormControl(null),
       attachment_type: new FormControl(MailFilterAttachmentType.Attachments),
+      pdf_layout: new FormControl(MailRulePdfLayout.Default),
       consumption_scope: new FormControl(MailRuleConsumptionScope.Attachments),
       order: new FormControl(null),
       action: new FormControl(MailAction.MarkRead),
@@ -231,5 +257,9 @@ export class MailRuleEditDialogComponent extends EditDialogComponent<MailRule> {
 
   get consumptionScopeOptions() {
     return CONSUMPTION_SCOPE_OPTIONS
+  }
+
+  get pdfLayoutOptions() {
+    return PDF_LAYOUT_OPTIONS
   }
 }

@@ -1,7 +1,6 @@
 import datetime
 import itertools
 import logging
-import os
 import ssl
 import tempfile
 import traceback
@@ -30,7 +29,7 @@ from imap_tools import MailBoxUnencrypted
 from imap_tools import MailMessage
 from imap_tools import MailMessageFlags
 from imap_tools import errors
-from imap_tools.mailbox import MailBoxTls
+from imap_tools.mailbox import MailBoxStartTls
 from imap_tools.query import LogicOperator
 
 from documents.data_models import ConsumableDocument
@@ -121,7 +120,7 @@ class MarkReadMailAction(BaseMailAction):
         return {"seen": False}
 
     def post_consume(self, M: MailBox, message_uid: str, parameter: str):
-        M.flag(message_uid, [MailMessageFlags.SEEN], True)
+        M.flag(message_uid, [MailMessageFlags.SEEN], value=True)
 
 
 class MoveMailAction(BaseMailAction):
@@ -142,7 +141,7 @@ class FlagMailAction(BaseMailAction):
         return {"flagged": False}
 
     def post_consume(self, M: MailBox, message_uid: str, parameter: str):
-        M.flag(message_uid, [MailMessageFlags.FLAGGED], True)
+        M.flag(message_uid, [MailMessageFlags.FLAGGED], value=True)
 
 
 class TagMailAction(BaseMailAction):
@@ -150,7 +149,7 @@ class TagMailAction(BaseMailAction):
     A mail action that tags mails after processing.
     """
 
-    def __init__(self, parameter: str, supports_gmail_labels: bool):
+    def __init__(self, parameter: str, *, supports_gmail_labels: bool):
         # The custom tag should look like "apple:<color>"
         if "apple:" in parameter.lower():
             _, self.color = parameter.split(":")
@@ -188,19 +187,19 @@ class TagMailAction(BaseMailAction):
             M.flag(
                 message_uid,
                 set(itertools.chain(*APPLE_MAIL_TAG_COLORS.values())),
-                False,
+                value=False,
             )
 
             # Set new $MailFlagBits
-            M.flag(message_uid, APPLE_MAIL_TAG_COLORS.get(self.color), True)
+            M.flag(message_uid, APPLE_MAIL_TAG_COLORS.get(self.color), value=True)
 
             # Set the general \Flagged
             # This defaults to the "red" flag in AppleMail and
             # "stars" in Thunderbird or GMail
-            M.flag(message_uid, [MailMessageFlags.FLAGGED], True)
+            M.flag(message_uid, [MailMessageFlags.FLAGGED], value=True)
 
         elif self.keyword:
-            M.flag(message_uid, [self.keyword], True)
+            M.flag(message_uid, [self.keyword], value=True)
 
         else:
             raise MailError("No keyword specified.")
@@ -268,7 +267,7 @@ def apply_mail_action(
             mailbox_login(M, account)
             M.folder.set(rule.folder)
 
-            action = get_rule_action(rule, supports_gmail_labels)
+            action = get_rule_action(rule, supports_gmail_labels=supports_gmail_labels)
             try:
                 action.post_consume(M, message_uid, rule.action_parameter)
             except errors.ImapToolsError:
@@ -323,7 +322,7 @@ def error_callback(
         folder=rule.folder,
         uid=message_uid,
         subject=message_subject,
-        received=message_date,
+        received=make_aware(message_date) if is_naive(message_date) else message_date,
         status="FAILED",
         error=traceback.format_exc(),
     )
@@ -356,7 +355,7 @@ def queue_consumption_tasks(
     ).delay()
 
 
-def get_rule_action(rule: MailRule, supports_gmail_labels: bool) -> BaseMailAction:
+def get_rule_action(rule: MailRule, *, supports_gmail_labels: bool) -> BaseMailAction:
     """
     Returns a BaseMailAction instance for the given rule.
     """
@@ -370,12 +369,15 @@ def get_rule_action(rule: MailRule, supports_gmail_labels: bool) -> BaseMailActi
     elif rule.action == MailRule.MailAction.MARK_READ:
         return MarkReadMailAction()
     elif rule.action == MailRule.MailAction.TAG:
-        return TagMailAction(rule.action_parameter, supports_gmail_labels)
+        return TagMailAction(
+            rule.action_parameter,
+            supports_gmail_labels=supports_gmail_labels,
+        )
     else:
         raise NotImplementedError("Unknown action.")  # pragma: no cover
 
 
-def make_criterias(rule: MailRule, supports_gmail_labels: bool):
+def make_criterias(rule: MailRule, *, supports_gmail_labels: bool):
     """
     Returns criteria to be applied to MailBox.fetch for the given rule.
     """
@@ -393,9 +395,12 @@ def make_criterias(rule: MailRule, supports_gmail_labels: bool):
     if rule.filter_body:
         criterias["body"] = rule.filter_body
 
-    rule_query = get_rule_action(rule, supports_gmail_labels).get_criteria()
+    rule_query = get_rule_action(
+        rule,
+        supports_gmail_labels=supports_gmail_labels,
+    ).get_criteria()
     if isinstance(rule_query, dict):
-        if len(rule_query) or len(criterias):
+        if len(rule_query) or criterias:
             return AND(**rule_query, **criterias)
         else:
             return "ALL"
@@ -414,7 +419,7 @@ def get_mailbox(server, port, security) -> MailBox:
     if security == MailAccount.ImapSecurity.NONE:
         mailbox = MailBoxUnencrypted(server, port)
     elif security == MailAccount.ImapSecurity.STARTTLS:
-        mailbox = MailBoxTls(server, port, ssl_context=ssl_context)
+        mailbox = MailBoxStartTls(server, port, ssl_context=ssl_context)
     elif security == MailAccount.ImapSecurity.SSL:
         mailbox = MailBox(server, port, ssl_context=ssl_context)
     else:
@@ -463,7 +468,12 @@ class MailAccountHandler(LoggingMixin):
 
     def _correspondent_from_name(self, name: str) -> Correspondent | None:
         try:
-            return Correspondent.objects.get_or_create(name=name)[0]
+            return Correspondent.objects.get_or_create(
+                name=name,
+                defaults={
+                    "match": name,
+                },
+            )[0]
         except DatabaseError as e:
             self.log.error(f"Error while retrieving correspondent {name}: {e}")
             return None
@@ -478,7 +488,7 @@ class MailAccountHandler(LoggingMixin):
             return message.subject
 
         elif rule.assign_title_from == MailRule.TitleSource.FROM_FILENAME:
-            return os.path.splitext(os.path.basename(att.filename))[0]
+            return Path(att.filename).stem
 
         elif rule.assign_title_from == MailRule.TitleSource.NONE:
             return None
@@ -552,8 +562,7 @@ class MailAccountHandler(LoggingMixin):
                 mailbox_login(M, account)
 
                 self.log.debug(
-                    f"Account {account}: Processing "
-                    f"{account.rules.count()} rule(s)",
+                    f"Account {account}: Processing {account.rules.count()} rule(s)",
                 )
 
                 for rule in account.rules.order_by("order"):
@@ -564,7 +573,7 @@ class MailAccountHandler(LoggingMixin):
                         total_processed_files += self._handle_mail_rule(
                             M,
                             rule,
-                            supports_gmail_labels,
+                            supports_gmail_labels=supports_gmail_labels,
                         )
                     except Exception as e:
                         self.log.exception(
@@ -589,6 +598,7 @@ class MailAccountHandler(LoggingMixin):
         self,
         M: MailBox,
         rule: MailRule,
+        *,
         supports_gmail_labels: bool,
     ):
         folders = [rule.folder]
@@ -617,7 +627,7 @@ class MailAccountHandler(LoggingMixin):
                 f"does not exist in account {rule.account}",
             ) from err
 
-        criterias = make_criterias(rule, supports_gmail_labels)
+        criterias = make_criterias(rule, supports_gmail_labels=supports_gmail_labels)
 
         self.log.debug(
             f"Rule {rule}: Searching folder with criteria {criterias}",
@@ -881,7 +891,9 @@ class MailAccountHandler(LoggingMixin):
                     folder=rule.folder,
                     uid=message.uid,
                     subject=message.subject,
-                    received=message.date,
+                    received=make_aware(message.date)
+                    if is_naive(message.date)
+                    else message.date,
                     status="PROCESSED_WO_CONSUMPTION",
                 )
 
@@ -900,7 +912,7 @@ class MailAccountHandler(LoggingMixin):
             dir=settings.SCRATCH_DIR,
             suffix=".eml",
         )
-        with open(temp_filename, "wb") as f:
+        with Path(temp_filename).open("wb") as f:
             # Move "From"-header to beginning of file
             # TODO: This ugly workaround is needed because the parser is
             #   chosen only by the mime_type detected via magic

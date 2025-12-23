@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger("paperless.management.consumer")
 
 
-def _tags_from_path(filepath) -> list[int]:
+def _tags_from_path(filepath: Path) -> list[int]:
     """
     Walk up the directory tree from filepath to CONSUMPTION_DIR
     and get or create Tag IDs for every directory.
@@ -41,7 +41,7 @@ def _tags_from_path(filepath) -> list[int]:
     """
     db.close_old_connections()
     tag_ids = set()
-    path_parts = Path(filepath).relative_to(settings.CONSUMPTION_DIR).parent.parts
+    path_parts = filepath.relative_to(settings.CONSUMPTION_DIR).parent.parts
     for part in path_parts:
         tag_ids.add(
             Tag.objects.get_or_create(name__iexact=part, defaults={"name": part})[0].pk,
@@ -50,17 +50,13 @@ def _tags_from_path(filepath) -> list[int]:
     return list(tag_ids)
 
 
-def _is_ignored(filepath: str) -> bool:
+def _is_ignored(filepath: Path) -> bool:
     """
     Checks if the given file should be ignored, based on configured
     patterns.
 
     Returns True if the file is ignored, False otherwise
     """
-    filepath = os.path.abspath(
-        os.path.normpath(filepath),
-    )
-
     # Trim out the consume directory, leaving only filename and it's
     # path relative to the consume directory
     filepath_relative = PurePath(filepath).relative_to(settings.CONSUMPTION_DIR)
@@ -85,15 +81,22 @@ def _is_ignored(filepath: str) -> bool:
     return False
 
 
-def _consume(filepath: str) -> None:
-    if os.path.isdir(filepath) or _is_ignored(filepath):
+def _consume(filepath: Path) -> None:
+    # Check permissions early
+    try:
+        filepath.stat()
+    except (PermissionError, OSError):
+        logger.warning(f"Not consuming file {filepath}: Permission denied.")
         return
 
-    if not os.path.isfile(filepath):
+    if filepath.is_dir() or _is_ignored(filepath):
+        return
+
+    if not filepath.is_file():
         logger.debug(f"Not consuming file {filepath}: File has moved.")
         return
 
-    if not is_file_ext_supported(os.path.splitext(filepath)[1]):
+    if not is_file_ext_supported(filepath.suffix):
         logger.warning(f"Not consuming file {filepath}: Unknown file extension.")
         return
 
@@ -107,7 +110,7 @@ def _consume(filepath: str) -> None:
 
     while (read_try_count < os_error_retry_count) and not file_open_ok:
         try:
-            with open(filepath, "rb"):
+            with filepath.open("rb"):
                 file_open_ok = True
         except OSError as e:
             read_try_count += 1
@@ -141,7 +144,7 @@ def _consume(filepath: str) -> None:
         logger.exception("Error while consuming document")
 
 
-def _consume_wait_unmodified(file: str) -> None:
+def _consume_wait_unmodified(file: Path) -> None:
     """
     Waits for the given file to appear unmodified based on file size
     and modification time.  Will wait a configured number of seconds
@@ -157,7 +160,7 @@ def _consume_wait_unmodified(file: str) -> None:
     current_try = 0
     while current_try < settings.CONSUMER_POLLING_RETRY_COUNT:
         try:
-            stat_data = os.stat(file)
+            stat_data = file.stat()
             new_mtime = stat_data.st_mtime
             new_size = stat_data.st_size
         except FileNotFoundError:
@@ -182,10 +185,10 @@ class Handler(FileSystemEventHandler):
         self._pool = pool
 
     def on_created(self, event):
-        self._pool.submit(_consume_wait_unmodified, event.src_path)
+        self._pool.submit(_consume_wait_unmodified, Path(event.src_path))
 
     def on_moved(self, event):
-        self._pool.submit(_consume_wait_unmodified, event.dest_path)
+        self._pool.submit(_consume_wait_unmodified, Path(event.dest_path))
 
 
 class Command(BaseCommand):
@@ -227,9 +230,9 @@ class Command(BaseCommand):
         if not directory:
             raise CommandError("CONSUMPTION_DIR does not appear to be set.")
 
-        directory = os.path.abspath(directory)
+        directory = Path(directory).resolve()
 
-        if not os.path.isdir(directory):
+        if not directory.is_dir():
             raise CommandError(f"Consumption directory {directory} does not exist")
 
         # Consumer will need this
@@ -238,25 +241,25 @@ class Command(BaseCommand):
         if recursive:
             for dirpath, _, filenames in os.walk(directory):
                 for filename in filenames:
-                    filepath = os.path.join(dirpath, filename)
+                    filepath = Path(dirpath) / filename
                     _consume(filepath)
         else:
-            for entry in os.scandir(directory):
-                _consume(entry.path)
+            for filepath in directory.iterdir():
+                _consume(filepath)
 
         if options["oneshot"]:
             return
 
         if settings.CONSUMER_POLLING == 0 and INotify:
-            self.handle_inotify(directory, recursive, options["testing"])
+            self.handle_inotify(directory, recursive, is_testing=options["testing"])
         else:
             if INotify is None and settings.CONSUMER_POLLING == 0:  # pragma: no cover
                 logger.warning("Using polling as INotify import failed")
-            self.handle_polling(directory, recursive, options["testing"])
+            self.handle_polling(directory, recursive, is_testing=options["testing"])
 
         logger.debug("Consumer exiting.")
 
-    def handle_polling(self, directory, recursive, is_testing: bool):
+    def handle_polling(self, directory, recursive, *, is_testing: bool):
         logger.info(f"Polling directory for changes: {directory}")
 
         timeout = None
@@ -283,7 +286,7 @@ class Command(BaseCommand):
                 observer.stop()
             observer.join()
 
-    def handle_inotify(self, directory, recursive, is_testing: bool):
+    def handle_inotify(self, directory, recursive, *, is_testing: bool):
         logger.info(f"Using inotify to watch directory for changes: {directory}")
 
         timeout_ms = None
@@ -294,9 +297,9 @@ class Command(BaseCommand):
         inotify = INotify()
         inotify_flags = flags.CLOSE_WRITE | flags.MOVED_TO | flags.MODIFY
         if recursive:
-            descriptor = inotify.add_watch_recursive(directory, inotify_flags)
+            inotify.add_watch_recursive(directory, inotify_flags)
         else:
-            descriptor = inotify.add_watch(directory, inotify_flags)
+            inotify.add_watch(directory, inotify_flags)
 
         inotify_debounce_secs: Final[float] = settings.CONSUMER_INOTIFY_DELAY
         inotify_debounce_ms: Final[int] = inotify_debounce_secs * 1000
@@ -305,55 +308,58 @@ class Command(BaseCommand):
 
         notified_files = {}
 
-        while not finished:
-            try:
-                for event in inotify.read(timeout=timeout_ms):
-                    path = inotify.get_path(event.wd) if recursive else directory
-                    filepath = os.path.join(path, event.name)
-                    if flags.MODIFY in flags.from_mask(event.mask):
-                        notified_files.pop(filepath, None)
+        try:
+            while not finished:
+                try:
+                    for event in inotify.read(timeout=timeout_ms):
+                        path = inotify.get_path(event.wd) if recursive else directory
+                        filepath = Path(path) / event.name
+                        if flags.MODIFY in flags.from_mask(event.mask):
+                            notified_files.pop(filepath, None)
+                        else:
+                            notified_files[filepath] = monotonic()
+
+                    # Check the files against the timeout
+                    still_waiting = {}
+                    # last_event_time is time of the last inotify event for this file
+                    for filepath, last_event_time in notified_files.items():
+                        # Current time - last time over the configured timeout
+                        waited_long_enough = (
+                            monotonic() - last_event_time
+                        ) > inotify_debounce_secs
+
+                        # Also make sure the file exists still, some scanners might write a
+                        # temporary file first
+                        try:
+                            file_still_exists = filepath.exists() and filepath.is_file()
+                        except (PermissionError, OSError):  # pragma: no cover
+                            # If we can't check, let it fail in the _consume function
+                            file_still_exists = True
+                            continue
+
+                        if waited_long_enough and file_still_exists:
+                            _consume(filepath)
+                        elif file_still_exists:
+                            still_waiting[filepath] = last_event_time
+
+                    # These files are still waiting to hit the timeout
+                    notified_files = still_waiting
+
+                    # If files are waiting, need to exit read() to check them
+                    # Otherwise, go back to infinite sleep time, but only if not testing
+                    if len(notified_files) > 0:
+                        timeout_ms = inotify_debounce_ms
+                    elif is_testing:
+                        timeout_ms = self.testing_timeout_ms
                     else:
-                        notified_files[filepath] = monotonic()
+                        timeout_ms = None
 
-                # Check the files against the timeout
-                still_waiting = {}
-                # last_event_time is time of the last inotify event for this file
-                for filepath, last_event_time in notified_files.items():
-                    # Current time - last time over the configured timeout
-                    waited_long_enough = (
-                        monotonic() - last_event_time
-                    ) > inotify_debounce_secs
+                    if self.stop_flag.is_set():
+                        logger.debug("Finishing because event is set")
+                        finished = True
 
-                    # Also make sure the file exists still, some scanners might write a
-                    # temporary file first
-                    file_still_exists = os.path.exists(filepath) and os.path.isfile(
-                        filepath,
-                    )
-
-                    if waited_long_enough and file_still_exists:
-                        _consume(filepath)
-                    elif file_still_exists:
-                        still_waiting[filepath] = last_event_time
-
-                # These files are still waiting to hit the timeout
-                notified_files = still_waiting
-
-                # If files are waiting, need to exit read() to check them
-                # Otherwise, go back to infinite sleep time, but only if not testing
-                if len(notified_files) > 0:
-                    timeout_ms = inotify_debounce_ms
-                elif is_testing:
-                    timeout_ms = self.testing_timeout_ms
-                else:
-                    timeout_ms = None
-
-                if self.stop_flag.is_set():
-                    logger.debug("Finishing because event is set")
+                except KeyboardInterrupt:
+                    logger.info("Received SIGINT, stopping inotify")
                     finished = True
-
-            except KeyboardInterrupt:
-                logger.info("Received SIGINT, stopping inotify")
-                finished = True
-
-        inotify.rm_watch(descriptor)
-        inotify.close()
+        finally:
+            inotify.close()

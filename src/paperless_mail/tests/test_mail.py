@@ -1,6 +1,7 @@
 import dataclasses
 import email.contentmanager
 import random
+import time
 import uuid
 from collections import namedtuple
 from contextlib import AbstractContextManager
@@ -25,6 +26,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from documents.models import Correspondent
+from documents.models import MatchingModel
 from documents.tests.utils import DirectoriesMixin
 from documents.tests.utils import FileSystemAssertsMixin
 from paperless_mail import tasks
@@ -79,7 +81,8 @@ class BogusClient:
                     flag = args[2]
                     if flag == "processed":
                         message._raw_flag_data.append(b"+FLAGS (processed)")
-                        MailMessage.flags.fget.cache_clear()
+                        if hasattr(message, "flags"):
+                            del message.flags
 
 
 class BogusMailBox(AbstractContextManager):
@@ -123,7 +126,7 @@ class BogusMailBox(AbstractContextManager):
         if username != self.USERNAME or access_token != self.ACCESS_TOKEN:
             raise MailboxLoginError("BAD", "OK")
 
-    def fetch(self, criteria, mark_seen, charset="", bulk=True):
+    def fetch(self, criteria, mark_seen, charset="", *, bulk=True):
         msg = self.messages
 
         criteria = str(criteria).strip("()").split(" ")
@@ -176,7 +179,8 @@ class BogusMailBox(AbstractContextManager):
                         message.seen = value
                     if flag == "processed":
                         message._raw_flag_data.append(b"+FLAGS (processed)")
-                        MailMessage.flags.fget.cache_clear()
+                        if hasattr(message, "flags"):
+                            del message.flags
 
     def move(self, uid_list, folder):
         if folder == "spam":
@@ -188,7 +192,7 @@ class BogusMailBox(AbstractContextManager):
             raise Exception
 
 
-def fake_magic_from_buffer(buffer, mime=False):
+def fake_magic_from_buffer(buffer, *, mime=False):
     if mime:
         if "PDF" in str(buffer):
             return "application/pdf"
@@ -204,6 +208,7 @@ class MessageBuilder:
 
     def create_message(
         self,
+        *,
         attachments: int | list[_AttachmentDef] = 1,
         body: str = "",
         subject: str = "the subject",
@@ -263,7 +268,8 @@ class MessageBuilder:
         imap_msg.flagged = flagged
         if processed:
             imap_msg._raw_flag_data.append(b"+FLAGS (processed)")
-            MailMessage.flags.fget.cache_clear()
+            if hasattr(imap_msg, "flags"):
+                del imap_msg.flags
 
         return imap_msg
 
@@ -381,6 +387,20 @@ class MailMocker(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
             apply_mail_action([], rule.pk, message.uid, message.subject, message.date)
 
 
+def assert_eventually_equals(getter_fn, expected_value, timeout=1.0, interval=0.05):
+    """
+    Repeatedly calls `getter_fn()` until the result equals `expected_value`,
+    or times out after `timeout` seconds.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if getter_fn() == expected_value:
+            return
+        time.sleep(interval)
+    actual = getter_fn()
+    raise AssertionError(f"Expected {expected_value}, but got {actual}")
+
+
 @mock.patch("paperless_mail.mail.magic.from_buffer", fake_magic_from_buffer)
 class TestMail(
     DirectoriesMixin,
@@ -427,6 +447,8 @@ class TestMail(
         c = handler._get_correspondent(message, rule)
         self.assertIsNotNone(c)
         self.assertEqual(c.name, "someone@somewhere.com")
+        self.assertEqual(c.matching_algorithm, MatchingModel.MATCH_ANY)
+        self.assertEqual(c.match, "someone@somewhere.com")
         c = handler._get_correspondent(message2, rule)
         self.assertIsNotNone(c)
         self.assertEqual(c.name, "me@localhost.com")
@@ -780,14 +802,21 @@ class TestMail(
         )
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)), 2)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
+            2,
+        )
 
         self.mail_account_handler.handle_mail_account(account)
         self.mailMocker.apply_mail_actions()
 
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)), 0)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
+            0,
+        )
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
 
+    @pytest.mark.flaky(reruns=4)
     def test_handle_mail_account_delete(self):
         account = MailAccount.objects.create(
             name="test",
@@ -808,7 +837,7 @@ class TestMail(
         self.mail_account_handler.handle_mail_account(account)
         self.mailMocker.apply_mail_actions()
 
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 1)
+        assert_eventually_equals(lambda: len(self.mailMocker.bogus_mailbox.messages), 1)
 
     def test_handle_mail_account_delete_no_filters(self):
         account = MailAccount.objects.create(
@@ -850,7 +879,7 @@ class TestMail(
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
         self.assertEqual(
-            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", False)),
+            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", mark_seen=False)),
             2,
         )
 
@@ -858,7 +887,7 @@ class TestMail(
         self.mailMocker.apply_mail_actions()
 
         self.assertEqual(
-            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", False)),
+            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", mark_seen=False)),
             1,
         )
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
@@ -931,7 +960,12 @@ class TestMail(
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
         self.assertEqual(
-            len(self.mailMocker.bogus_mailbox.fetch("UNKEYWORD processed", False)),
+            len(
+                self.mailMocker.bogus_mailbox.fetch(
+                    "UNKEYWORD processed",
+                    mark_seen=False,
+                ),
+            ),
             2,
         )
 
@@ -940,7 +974,12 @@ class TestMail(
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
         self.assertEqual(
-            len(self.mailMocker.bogus_mailbox.fetch("UNKEYWORD processed", False)),
+            len(
+                self.mailMocker.bogus_mailbox.fetch(
+                    "UNKEYWORD processed",
+                    mark_seen=False,
+                ),
+            ),
             0,
         )
 
@@ -964,12 +1003,18 @@ class TestMail(
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
         criteria = NOT(gmail_label="processed")
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch(criteria, False)), 2)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch(criteria, mark_seen=False)),
+            2,
+        )
 
         self.mail_account_handler.handle_mail_account(account)
         self.mailMocker.apply_mail_actions()
 
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch(criteria, False)), 0)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch(criteria, mark_seen=False)),
+            0,
+        )
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
 
     def test_tag_mail_action_applemail_wrong_input(self):
@@ -977,7 +1022,7 @@ class TestMail(
             MailError,
             TagMailAction,
             "apple:black",
-            False,
+            supports_gmail_labels=False,
         )
 
     def test_handle_mail_account_tag_applemail(self):
@@ -999,7 +1044,7 @@ class TestMail(
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
         self.assertEqual(
-            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", False)),
+            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", mark_seen=False)),
             2,
         )
 
@@ -1007,7 +1052,7 @@ class TestMail(
         self.mailMocker.apply_mail_actions()
 
         self.assertEqual(
-            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", False)),
+            len(self.mailMocker.bogus_mailbox.fetch("UNFLAGGED", mark_seen=False)),
             0,
         )
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
@@ -1063,6 +1108,7 @@ class TestMail(
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 2)
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages_spam), 1)
 
+    @pytest.mark.flaky(reruns=4)
     def test_error_skip_rule(self):
         account = MailAccount.objects.create(
             name="test2",
@@ -1321,13 +1367,19 @@ class TestMail(
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
         self.mailMocker._queue_consumption_tasks_mock.assert_not_called()
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)), 2)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
+            2,
+        )
 
         self.mail_account_handler.handle_mail_account(account)
         self.mailMocker.apply_mail_actions()
 
         self.assertEqual(self.mailMocker._queue_consumption_tasks_mock.call_count, 2)
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)), 0)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
+            0,
+        )
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
 
     def test_auth_plain_fallback_fails_still(self):
@@ -1387,13 +1439,19 @@ class TestMail(
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
         self.assertEqual(self.mailMocker._queue_consumption_tasks_mock.call_count, 0)
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)), 2)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
+            2,
+        )
 
         self.mail_account_handler.handle_mail_account(account)
         self.mailMocker.apply_mail_actions()
 
         self.assertEqual(self.mailMocker._queue_consumption_tasks_mock.call_count, 2)
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)), 0)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
+            0,
+        )
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
 
     def test_disabled_rule(self):
@@ -1422,12 +1480,15 @@ class TestMail(
         self.mailMocker.apply_mail_actions()
 
         self.assertEqual(len(self.mailMocker.bogus_mailbox.messages), 3)
-        self.assertEqual(len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)), 2)
+        self.assertEqual(
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
+            2,
+        )
 
         self.mail_account_handler.handle_mail_account(account)
         self.mailMocker.apply_mail_actions()
         self.assertEqual(
-            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", False)),
+            len(self.mailMocker.bogus_mailbox.fetch("UNSEEN", mark_seen=False)),
             2,
         )  # still 2
 
@@ -1781,3 +1842,66 @@ class TestMailAccountProcess(APITestCase):
         response = self.client.post(self.url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         m.assert_called_once()
+
+
+class TestMailRuleAPI(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            username="testuser",
+            password="testpassword",
+        )
+        self.client.force_authenticate(user=self.user)
+        self.account = MailAccount.objects.create(
+            imap_server="imap.example.com",
+            imap_port=993,
+            imap_security=MailAccount.ImapSecurity.SSL,
+            username="admin",
+            password="secret",
+            account_type=MailAccount.MailAccountType.IMAP,
+            owner=self.user,
+        )
+        self.url = "/api/mail_rules/"
+
+    def test_create_mail_rule(self):
+        """
+        GIVEN:
+            - Valid data for creating a mail rule
+        WHEN:
+            - A POST request is made to the mail rules endpoint
+        THEN:
+            - The rule should be created successfully
+            - The response should contain the created rule's details
+        """
+        data = {
+            "name": "Test Rule",
+            "account": self.account.pk,
+            "action": MailRule.MailAction.MOVE,
+            "action_parameter": "inbox",
+        }
+        response = self.client.post(self.url, data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(MailRule.objects.count(), 1)
+        rule = MailRule.objects.first()
+        self.assertEqual(rule.name, "Test Rule")
+
+    def test_mail_rule_action_parameter_required_for_tag_or_move(self):
+        """
+        GIVEN:
+            - Valid data for creating a mail rule without action_parameter
+        WHEN:
+            - A POST request is made to the mail rules endpoint
+        THEN:
+            - The request should fail with a 400 Bad Request status
+            - The response should indicate that action_parameter is required
+        """
+        data = {
+            "name": "Test Rule",
+            "account": self.account.pk,
+            "action": MailRule.MailAction.MOVE,
+        }
+        response = self.client.post(self.url, data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(
+            "action parameter is required",
+            str(response.data["non_field_errors"]),
+        )

@@ -2,10 +2,10 @@ import { AsyncPipe, ViewportScroller } from '@angular/common'
 import {
   AfterViewInit,
   Component,
-  Inject,
   LOCALE_ID,
   OnDestroy,
   OnInit,
+  inject,
 } from '@angular/core'
 import {
   FormControl,
@@ -49,6 +49,7 @@ import {
   PermissionsService,
 } from 'src/app/services/permissions.service'
 import { GroupService } from 'src/app/services/rest/group.service'
+import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { UserService } from 'src/app/services/rest/user.service'
 import {
   LanguageOption,
@@ -56,6 +57,7 @@ import {
 } from 'src/app/services/settings.service'
 import { SystemStatusService } from 'src/app/services/system-status.service'
 import { Toast, ToastService } from 'src/app/services/toast.service'
+import { locationReload } from 'src/app/utils/navigation'
 import { CheckComponent } from '../../common/input/check/check.component'
 import { ColorComponent } from '../../common/input/color/color.component'
 import { PermissionsGroupComponent } from '../../common/input/permissions/permissions-group/permissions-group.component'
@@ -63,6 +65,7 @@ import { PermissionsUserComponent } from '../../common/input/permissions/permiss
 import { SelectComponent } from '../../common/input/select/select.component'
 import { PageHeaderComponent } from '../../common/page-header/page-header.component'
 import { SystemStatusDialogComponent } from '../../common/system-status-dialog/system-status-dialog.component'
+import { ZoomSetting } from '../../document-detail/document-detail.component'
 import { ComponentWithPermissions } from '../../with-permissions/with-permissions.component'
 
 enum SettingsNavIDs {
@@ -103,6 +106,21 @@ export class SettingsComponent
   extends ComponentWithPermissions
   implements OnInit, AfterViewInit, OnDestroy, DirtyComponent
 {
+  private documentListViewService = inject(DocumentListViewService)
+  private toastService = inject(ToastService)
+  private settings = inject(SettingsService)
+  currentLocale = inject(LOCALE_ID)
+  private viewportScroller = inject(ViewportScroller)
+  private activatedRoute = inject(ActivatedRoute)
+  readonly tourService = inject(TourService)
+  private usersService = inject(UserService)
+  private groupsService = inject(GroupService)
+  private router = inject(Router)
+  permissionsService = inject(PermissionsService)
+  private modalService = inject(NgbModal)
+  private systemStatusService = inject(SystemStatusService)
+  private savedViewsService = inject(SavedViewService)
+
   activeNavID: number
 
   settingsForm = new FormGroup({
@@ -125,6 +143,7 @@ export class SettingsComponent
     defaultPermsEditUsers: new FormControl(null),
     defaultPermsEditGroups: new FormControl(null),
     useNativePdfViewer: new FormControl(null),
+    pdfViewerDefaultZoom: new FormControl(null),
     documentEditingRemoveInboxTags: new FormControl(null),
     documentEditingOverlayThumbnail: new FormControl(null),
     searchDbOnly: new FormControl(null),
@@ -136,6 +155,7 @@ export class SettingsComponent
     notificationsConsumerSuppressOnDashboard: new FormControl(null),
 
     savedViewsWarnOnUnsavedChange: new FormControl(null),
+    sidebarViewsShowCount: new FormControl(null),
   })
 
   SettingsNavIDs = SettingsNavIDs
@@ -154,13 +174,19 @@ export class SettingsComponent
 
   public readonly GlobalSearchType = GlobalSearchType
 
+  public readonly ZoomSetting = ZoomSetting
+
   get systemStatusHasErrors(): boolean {
     return (
       this.systemStatus.database.status === SystemStatusItemStatus.ERROR ||
       this.systemStatus.tasks.redis_status === SystemStatusItemStatus.ERROR ||
       this.systemStatus.tasks.celery_status === SystemStatusItemStatus.ERROR ||
       this.systemStatus.tasks.index_status === SystemStatusItemStatus.ERROR ||
-      this.systemStatus.tasks.classifier_status === SystemStatusItemStatus.ERROR
+      this.systemStatus.tasks.classifier_status ===
+        SystemStatusItemStatus.ERROR ||
+      this.systemStatus.tasks.sanity_check_status ===
+        SystemStatusItemStatus.ERROR ||
+      this.systemStatus.websocket_connected === SystemStatusItemStatus.ERROR
     )
   }
 
@@ -172,24 +198,11 @@ export class SettingsComponent
     )
   }
 
-  constructor(
-    private documentListViewService: DocumentListViewService,
-    private toastService: ToastService,
-    private settings: SettingsService,
-    @Inject(LOCALE_ID) public currentLocale: string,
-    private viewportScroller: ViewportScroller,
-    private activatedRoute: ActivatedRoute,
-    public readonly tourService: TourService,
-    private usersService: UserService,
-    private groupsService: GroupService,
-    private router: Router,
-    public permissionsService: PermissionsService,
-    private modalService: NgbModal,
-    private systemStatusService: SystemStatusService
-  ) {
+  constructor() {
     super()
     this.settings.settingsSaved.subscribe(() => {
       if (!this.savePending) this.initialize()
+      this.savedViewsService.maybeRefreshDocumentCounts()
     })
   }
 
@@ -276,6 +289,9 @@ export class SettingsComponent
       useNativePdfViewer: this.settings.get(
         SETTINGS_KEYS.USE_NATIVE_PDF_VIEWER
       ),
+      pdfViewerDefaultZoom: this.settings.get(
+        SETTINGS_KEYS.PDF_VIEWER_ZOOM_SETTING
+      ),
       displayLanguage: this.settings.getLanguage(),
       dateLocale: this.settings.get(SETTINGS_KEYS.DATE_LOCALE),
       dateFormat: this.settings.get(SETTINGS_KEYS.DATE_FORMAT),
@@ -297,6 +313,9 @@ export class SettingsComponent
       ),
       savedViewsWarnOnUnsavedChange: this.settings.get(
         SETTINGS_KEYS.SAVED_VIEWS_WARN_ON_UNSAVED_CHANGE
+      ),
+      sidebarViewsShowCount: this.settings.get(
+        SETTINGS_KEYS.SIDEBAR_VIEWS_SHOW_COUNT
       ),
       defaultPermsOwner: this.settings.get(SETTINGS_KEYS.DEFAULT_PERMS_OWNER),
       defaultPermsViewUsers: this.settings.get(
@@ -436,6 +455,10 @@ export class SettingsComponent
       this.settingsForm.value.useNativePdfViewer
     )
     this.settings.set(
+      SETTINGS_KEYS.PDF_VIEWER_ZOOM_SETTING,
+      this.settingsForm.value.pdfViewerDefaultZoom
+    )
+    this.settings.set(
       SETTINGS_KEYS.DATE_LOCALE,
       this.settingsForm.value.dateLocale
     )
@@ -470,6 +493,10 @@ export class SettingsComponent
     this.settings.set(
       SETTINGS_KEYS.SAVED_VIEWS_WARN_ON_UNSAVED_CHANGE,
       this.settingsForm.value.savedViewsWarnOnUnsavedChange
+    )
+    this.settings.set(
+      SETTINGS_KEYS.SIDEBAR_VIEWS_SHOW_COUNT,
+      this.settingsForm.value.sidebarViewsShowCount
     )
     this.settings.set(
       SETTINGS_KEYS.DEFAULT_PERMS_OWNER,
@@ -525,7 +552,7 @@ export class SettingsComponent
             savedToast.content = $localize`Settings were saved successfully. Reload is required to apply some changes.`
             savedToast.actionName = $localize`Reload now`
             savedToast.action = () => {
-              location.reload()
+              locationReload()
             }
           }
 

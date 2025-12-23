@@ -1,6 +1,7 @@
 import { AsyncPipe, NgClass, NgTemplateOutlet } from '@angular/common'
 import {
   Component,
+  inject,
   OnDestroy,
   OnInit,
   QueryList,
@@ -14,7 +15,11 @@ import {
   Router,
   RouterModule,
 } from '@angular/router'
-import { NgbDropdownModule, NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import {
+  NgbDropdownModule,
+  NgbModal,
+  NgbPaginationModule,
+} from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { TourNgBootstrapModule } from 'ngx-ui-tour-ng-bootstrap'
 import { filter, first, map, Subject, switchMap, takeUntil } from 'rxjs'
@@ -33,10 +38,12 @@ import {
   SortableDirective,
   SortEvent,
 } from 'src/app/directives/sortable.directive'
+import { CorrespondentNamePipe } from 'src/app/pipes/correspondent-name.pipe'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
+import { DocumentTypeNamePipe } from 'src/app/pipes/document-type-name.pipe'
+import { StoragePathNamePipe } from 'src/app/pipes/storage-path-name.pipe'
 import { UsernamePipe } from 'src/app/pipes/username.pipe'
-import { ConsumerStatusService } from 'src/app/services/consumer-status.service'
 import { DocumentListViewService } from 'src/app/services/document-list-view.service'
 import { HotKeyService } from 'src/app/services/hot-key.service'
 import { OpenDocumentsService } from 'src/app/services/open-documents.service'
@@ -44,12 +51,16 @@ import { PermissionsService } from 'src/app/services/permissions.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
+import { WebsocketStatusService } from 'src/app/services/websocket-status.service'
 import {
   filterRulesDiffer,
   isFullTextFilterRule,
 } from 'src/app/utils/filter-rules'
+import { ClearableBadgeComponent } from '../common/clearable-badge/clearable-badge.component'
+import { CustomFieldDisplayComponent } from '../common/custom-field-display/custom-field-display.component'
 import { PageHeaderComponent } from '../common/page-header/page-header.component'
 import { PreviewPopupComponent } from '../common/preview-popup/preview-popup.component'
+import { TagComponent } from '../common/tag/tag.component'
 import { ComponentWithPermissions } from '../with-permissions/with-permissions.component'
 import { BulkEditorComponent } from './bulk-editor/bulk-editor.component'
 import { DocumentCardLargeComponent } from './document-card-large/document-card-large.component'
@@ -62,23 +73,30 @@ import { SaveViewConfigDialogComponent } from './save-view-config-dialog/save-vi
   templateUrl: './document-list.component.html',
   styleUrls: ['./document-list.component.scss'],
   imports: [
+    ClearableBadgeComponent,
+    CustomFieldDisplayComponent,
     PageHeaderComponent,
     BulkEditorComponent,
     FilterEditorComponent,
     DocumentCardSmallComponent,
     DocumentCardLargeComponent,
     PreviewPopupComponent,
+    TagComponent,
     CustomDatePipe,
     DocumentTitlePipe,
     IfPermissionsDirective,
     SortableDirective,
     UsernamePipe,
+    CorrespondentNamePipe,
+    DocumentTypeNamePipe,
+    StoragePathNamePipe,
     NgxBootstrapIconsModule,
     AsyncPipe,
     FormsModule,
     ReactiveFormsModule,
     NgTemplateOutlet,
     NgbDropdownModule,
+    NgbPaginationModule,
     NgClass,
     RouterModule,
     TourNgBootstrapModule,
@@ -88,24 +106,20 @@ export class DocumentListComponent
   extends ComponentWithPermissions
   implements OnInit, OnDestroy
 {
+  list = inject(DocumentListViewService)
+  savedViewService = inject(SavedViewService)
+  route = inject(ActivatedRoute)
+  private router = inject(Router)
+  private toastService = inject(ToastService)
+  private modalService = inject(NgbModal)
+  private websocketStatusService = inject(WebsocketStatusService)
+  openDocumentsService = inject(OpenDocumentsService)
+  settingsService = inject(SettingsService)
+  private hotKeyService = inject(HotKeyService)
+  permissionService = inject(PermissionsService)
+
   DisplayField = DisplayField
   DisplayMode = DisplayMode
-
-  constructor(
-    public list: DocumentListViewService,
-    public savedViewService: SavedViewService,
-    public route: ActivatedRoute,
-    private router: Router,
-    private toastService: ToastService,
-    private modalService: NgbModal,
-    private consumerStatusService: ConsumerStatusService,
-    public openDocumentsService: OpenDocumentsService,
-    public settingsService: SettingsService,
-    private hotKeyService: HotKeyService,
-    public permissionService: PermissionsService
-  ) {
-    super()
-  }
 
   @ViewChild('filterEditor')
   private filterEditor: FilterEditorComponent
@@ -219,12 +233,16 @@ export class DocumentListComponent
   }
 
   ngOnInit(): void {
-    this.consumerStatusService
+    this.websocketStatusService
       .onDocumentConsumptionFinished()
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(() => {
         this.list.reload()
       })
+
+    this.websocketStatusService.onDocumentDeleted().subscribe(() => {
+      this.list.reload()
+    })
 
     this.route.paramMap
       .pipe(
@@ -248,7 +266,9 @@ export class DocumentListComponent
           view,
           convertToParamMap(this.route.snapshot.queryParams)
         )
-        this.list.reload()
+        this.list.reload(() => {
+          this.savedViewService.setDocumentCount(view, this.list.collectionSize)
+        })
         this.updateDisplayCustomFields()
         this.unmodifiedFilterRules = view.filter_rules
       })
@@ -358,12 +378,20 @@ export class DocumentListComponent
       this.savedViewService
         .patch(savedView)
         .pipe(first())
-        .subscribe((view) => {
-          this.unmodifiedSavedView = view
-          this.toastService.showInfo(
-            $localize`View "${this.list.activeSavedViewTitle}" saved successfully.`
-          )
-          this.unmodifiedFilterRules = this.list.filterRules
+        .subscribe({
+          next: (view) => {
+            this.unmodifiedSavedView = view
+            this.toastService.showInfo(
+              $localize`View "${this.list.activeSavedViewTitle}" saved successfully.`
+            )
+            this.unmodifiedFilterRules = this.list.filterRules
+          },
+          error: (err) => {
+            this.toastService.showError(
+              $localize`Failed to save view "${this.list.activeSavedViewTitle}".`,
+              err
+            )
+          },
         })
     }
   }
@@ -375,7 +403,9 @@ export class DocumentListComponent
       .subscribe((view) => {
         this.unmodifiedSavedView = view
         this.list.activateSavedView(view)
-        this.list.reload()
+        this.list.reload(() => {
+          this.savedViewService.setDocumentCount(view, this.list.collectionSize)
+        })
       })
   }
 

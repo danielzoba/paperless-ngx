@@ -6,15 +6,16 @@ from documents.serialisers import OwnedObjectSerializer
 from documents.serialisers import TagsField
 from paperless_mail.models import MailAccount
 from paperless_mail.models import MailRule
+from paperless_mail.models import ProcessedMail
 
 
-class ObfuscatedPasswordField(serializers.Field):
+class ObfuscatedPasswordField(serializers.CharField):
     """
     Sends *** string instead of password in the clear
     """
 
-    def to_representation(self, value):
-        return "*" * len(value)
+    def to_representation(self, value) -> str:
+        return "*" * max(10, len(value))
 
     def to_internal_value(self, data):
         return data
@@ -96,6 +97,7 @@ class MailRuleSerializer(OwnedObjectSerializer):
             "order",
             "attachment_type",
             "consumption_scope",
+            "pdf_layout",
             "owner",
             "user_can_change",
             "permissions",
@@ -107,18 +109,42 @@ class MailRuleSerializer(OwnedObjectSerializer):
         return instance
 
     def create(self, validated_data):
-        if "assign_tags" in validated_data:
-            assign_tags = validated_data.pop("assign_tags")
+        assign_tags = validated_data.pop("assign_tags", [])
         mail_rule = super().create(validated_data)
         if assign_tags:
             mail_rule.assign_tags.set(assign_tags)
         return mail_rule
 
     def validate(self, attrs):
+        action = attrs.get("action")
+        action_parameter = attrs.get("action_parameter")
+
         if (
-            attrs["action"] == MailRule.MailAction.TAG
-            or attrs["action"] == MailRule.MailAction.MOVE
-        ) and attrs["action_parameter"] is None:
+            action in [MailRule.MailAction.TAG, MailRule.MailAction.MOVE]
+            and not action_parameter
+        ):
             raise serializers.ValidationError("An action parameter is required.")
 
         return attrs
+
+    def validate_maximum_age(self, value):
+        if value > 36500:  # ~100 years
+            raise serializers.ValidationError("Maximum mail age is unreasonably large.")
+        return value
+
+
+class ProcessedMailSerializer(OwnedObjectSerializer):
+    class Meta:
+        model = ProcessedMail
+        fields = [
+            "id",
+            "owner",
+            "rule",
+            "folder",
+            "uid",
+            "subject",
+            "received",
+            "processed",
+            "status",
+            "error",
+        ]

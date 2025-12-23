@@ -36,18 +36,17 @@ import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
 import { FilterPipe } from 'src/app/pipes/filter.pipe'
-import { SafeHtmlPipe } from 'src/app/pipes/safehtml.pipe'
 import { UsernamePipe } from 'src/app/pipes/username.pipe'
-import {
-  ConsumerStatusService,
-  FileStatus,
-} from 'src/app/services/consumer-status.service'
 import { DocumentListViewService } from 'src/app/services/document-list-view.service'
 import { PermissionsService } from 'src/app/services/permissions.service'
 import { DocumentService } from 'src/app/services/rest/document.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
+import {
+  FileStatus,
+  WebsocketStatusService,
+} from 'src/app/services/websocket-status.service'
 import { DocumentCardLargeComponent } from './document-card-large/document-card-large.component'
 import { DocumentCardSmallComponent } from './document-card-small/document-card-small.component'
 import { DocumentListComponent } from './document-list.component'
@@ -57,21 +56,21 @@ const docs: Document[] = [
     id: 1,
     title: 'Doc1',
     notes: [],
-    tags$: new Subject(),
+    tags: [],
     content: 'document content 1',
   },
   {
     id: 2,
     title: 'Doc2',
     notes: [],
-    tags$: new Subject(),
+    tags: [],
     content: 'document content 2',
   },
   {
     id: 3,
     title: 'Doc3',
     notes: [],
-    tags$: new Subject(),
+    tags: [],
     content: 'document content 3',
   },
 ]
@@ -81,7 +80,7 @@ describe('DocumentListComponent', () => {
   let fixture: ComponentFixture<DocumentListComponent>
   let documentListService: DocumentListViewService
   let documentService: DocumentService
-  let consumerStatusService: ConsumerStatusService
+  let websocketStatusService: WebsocketStatusService
   let savedViewService: SavedViewService
   let router: Router
   let activatedRoute: ActivatedRoute
@@ -103,7 +102,6 @@ describe('DocumentListComponent', () => {
         DatePipe,
         DocumentTitlePipe,
         UsernamePipe,
-        SafeHtmlPipe,
         PermissionsGuard,
         provideHttpClient(withInterceptorsFromDi()),
         provideHttpClientTesting(),
@@ -112,7 +110,7 @@ describe('DocumentListComponent', () => {
 
     documentListService = TestBed.inject(DocumentListViewService)
     documentService = TestBed.inject(DocumentService)
-    consumerStatusService = TestBed.inject(ConsumerStatusService)
+    websocketStatusService = TestBed.inject(WebsocketStatusService)
     savedViewService = TestBed.inject(SavedViewService)
     router = TestBed.inject(Router)
     activatedRoute = TestBed.inject(ActivatedRoute)
@@ -128,10 +126,21 @@ describe('DocumentListComponent', () => {
     const reloadSpy = jest.spyOn(documentListService, 'reload')
     const fileStatusSubject = new Subject<FileStatus>()
     jest
-      .spyOn(consumerStatusService, 'onDocumentConsumptionFinished')
+      .spyOn(websocketStatusService, 'onDocumentConsumptionFinished')
       .mockReturnValue(fileStatusSubject)
     fixture.detectChanges()
     fileStatusSubject.next(new FileStatus())
+    expect(reloadSpy).toHaveBeenCalled()
+  })
+
+  it('should reload on document deleted', () => {
+    const reloadSpy = jest.spyOn(documentListService, 'reload')
+    const documentDeletedSubject = new Subject<boolean>()
+    jest
+      .spyOn(websocketStatusService, 'onDocumentDeleted')
+      .mockReturnValue(documentDeletedSubject)
+    fixture.detectChanges()
+    documentDeletedSubject.next(true)
     expect(reloadSpy).toHaveBeenCalled()
   })
 
@@ -188,6 +197,14 @@ describe('DocumentListComponent', () => {
     }
     const queryParams = { id: view.id.toString() }
     const getSavedViewSpy = jest.spyOn(savedViewService, 'getCached')
+    const setCountSpy = jest.spyOn(savedViewService, 'setDocumentCount')
+    jest.spyOn(documentService, 'listFiltered').mockReturnValue(
+      of({
+        results: docs,
+        count: 3,
+        all: docs.map((d) => d.id),
+      })
+    )
     getSavedViewSpy.mockReturnValue(of(view))
     const activateSavedViewSpy = jest.spyOn(
       documentListService,
@@ -204,6 +221,7 @@ describe('DocumentListComponent', () => {
       view,
       convertToParamMap(queryParams)
     )
+    expect(setCountSpy).toHaveBeenCalledWith(view, 3)
   })
 
   it('should 404 on load saved view from URL if no view', () => {
@@ -235,6 +253,34 @@ describe('DocumentListComponent', () => {
       .mockReturnValue(of(convertToParamMap({ view: view.id.toString() })))
     fixture.detectChanges()
     expect(getSavedViewSpy).toHaveBeenCalledWith(view.id)
+  })
+
+  it('should update saved view document count on load saved view from query params', () => {
+    jest.spyOn(savedViewService, 'getCached').mockReturnValue(
+      of({
+        id: 10,
+        sort_field: 'added',
+        sort_reverse: true,
+        filter_rules: [],
+      })
+    )
+    jest.spyOn(documentService, 'listFiltered').mockReturnValue(
+      of({
+        results: docs,
+        count: 3,
+        all: docs.map((d) => d.id),
+      })
+    )
+    const setCountSpy = jest.spyOn(savedViewService, 'setDocumentCount')
+    jest.spyOn(documentService, 'listFiltered').mockReturnValue(
+      of({
+        results: docs,
+        count: 3,
+        all: docs.map((d) => d.id),
+      })
+    )
+    component.loadViewConfig(10)
+    expect(setCountSpy).toHaveBeenCalledWith(expect.any(Object), 3)
   })
 
   it('should support 3 different display modes', () => {
@@ -365,7 +411,7 @@ describe('DocumentListComponent', () => {
     expect(documentListService.selected.size).toEqual(3)
   })
 
-  it('should support saving an edited view', () => {
+  it('should support saving a view', () => {
     const view: SavedView = {
       id: 10,
       name: 'Saved View 10',
@@ -400,6 +446,30 @@ describe('DocumentListComponent', () => {
     expect(savedViewServicePatch).toHaveBeenCalledWith(modifiedView)
     expect(toastSpy).toHaveBeenCalledWith(
       `View "${view.name}" saved successfully.`
+    )
+  })
+
+  it('should handle error on view saving', () => {
+    component.list.activateSavedView({
+      id: 10,
+      name: 'Saved View 10',
+      sort_field: 'added',
+      sort_reverse: true,
+      filter_rules: [
+        {
+          rule_type: FILTER_HAS_TAGS_ANY,
+          value: '20',
+        },
+      ],
+    })
+    const toastErrorSpy = jest.spyOn(toastService, 'showError')
+    jest
+      .spyOn(savedViewService, 'patch')
+      .mockReturnValueOnce(throwError(() => new Error('Error saving view')))
+    component.saveViewConfig()
+    expect(toastErrorSpy).toHaveBeenCalledWith(
+      'Failed to save view "Saved View 10".',
+      expect.any(Error)
     )
   })
 
@@ -650,7 +720,6 @@ describe('DocumentListComponent', () => {
       id: i + 1,
       title: `Doc${i + 1}`,
       notes: [],
-      tags$: new Subject(),
       content: `document content ${i + 1}`,
     }))
     jest

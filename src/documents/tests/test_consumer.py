@@ -1,16 +1,11 @@
 import datetime
-import os
-import re
 import shutil
 import stat
 import tempfile
-import zoneinfo
 from pathlib import Path
-from unittest import TestCase as UnittestTestCase
 from unittest import mock
 from unittest.mock import MagicMock
 
-from dateutil import tz
 from django.conf import settings
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
@@ -21,11 +16,11 @@ from guardian.core import ObjectPermissionChecker
 
 from documents.consumer import ConsumerError
 from documents.data_models import DocumentMetadataOverrides
+from documents.data_models import DocumentSource
 from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import Document
 from documents.models import DocumentType
-from documents.models import FileInfo
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.parsers import DocumentParser
@@ -35,143 +30,8 @@ from documents.tasks import sanity_check
 from documents.tests.utils import DirectoriesMixin
 from documents.tests.utils import FileSystemAssertsMixin
 from documents.tests.utils import GetConsumerMixin
-
-
-class TestAttributes(UnittestTestCase):
-    TAGS = ("tag1", "tag2", "tag3")
-
-    def _test_guess_attributes_from_name(self, filename, sender, title, tags):
-        file_info = FileInfo.from_filename(filename)
-
-        if sender:
-            self.assertEqual(file_info.correspondent.name, sender, filename)
-        else:
-            self.assertIsNone(file_info.correspondent, filename)
-
-        self.assertEqual(file_info.title, title, filename)
-
-        self.assertEqual(tuple(t.name for t in file_info.tags), tags, filename)
-
-    def test_guess_attributes_from_name_when_title_starts_with_dash(self):
-        self._test_guess_attributes_from_name(
-            "- weird but should not break.pdf",
-            None,
-            "- weird but should not break",
-            (),
-        )
-
-    def test_guess_attributes_from_name_when_title_ends_with_dash(self):
-        self._test_guess_attributes_from_name(
-            "weird but should not break -.pdf",
-            None,
-            "weird but should not break -",
-            (),
-        )
-
-
-class TestFieldPermutations(TestCase):
-    valid_dates = (
-        "20150102030405Z",
-        "20150102Z",
-    )
-    valid_correspondents = ["timmy", "Dr. McWheelie", "Dash Gor-don", "o Θεpμaoτής", ""]
-    valid_titles = ["title", "Title w Spaces", "Title a-dash", "Tίτλoς", ""]
-    valid_tags = ["tag", "tig,tag", "tag1,tag2,tag-3"]
-
-    def _test_guessed_attributes(
-        self,
-        filename,
-        created=None,
-        correspondent=None,
-        title=None,
-        tags=None,
-    ):
-        info = FileInfo.from_filename(filename)
-
-        # Created
-        if created is None:
-            self.assertIsNone(info.created, filename)
-        else:
-            self.assertEqual(info.created.year, int(created[:4]), filename)
-            self.assertEqual(info.created.month, int(created[4:6]), filename)
-            self.assertEqual(info.created.day, int(created[6:8]), filename)
-
-        # Correspondent
-        if correspondent:
-            self.assertEqual(info.correspondent.name, correspondent, filename)
-        else:
-            self.assertEqual(info.correspondent, None, filename)
-
-        # Title
-        self.assertEqual(info.title, title, filename)
-
-        # Tags
-        if tags is None:
-            self.assertEqual(info.tags, (), filename)
-        else:
-            self.assertEqual([t.name for t in info.tags], tags.split(","), filename)
-
-    def test_just_title(self):
-        template = "{title}.pdf"
-        for title in self.valid_titles:
-            spec = dict(title=title)
-            filename = template.format(**spec)
-            self._test_guessed_attributes(filename, **spec)
-
-    def test_created_and_title(self):
-        template = "{created} - {title}.pdf"
-
-        for created in self.valid_dates:
-            for title in self.valid_titles:
-                spec = {"created": created, "title": title}
-                self._test_guessed_attributes(template.format(**spec), **spec)
-
-    def test_invalid_date_format(self):
-        info = FileInfo.from_filename("06112017Z - title.pdf")
-        self.assertEqual(info.title, "title")
-        self.assertIsNone(info.created)
-
-    def test_filename_parse_transforms(self):
-        filename = "tag1,tag2_20190908_180610_0001.pdf"
-        all_patt = re.compile("^.*$")
-        none_patt = re.compile("$a")
-        re.compile("^([a-z0-9,]+)_(\\d{8})_(\\d{6})_([0-9]+)\\.")
-
-        # No transformations configured (= default)
-        info = FileInfo.from_filename(filename)
-        self.assertEqual(info.title, "tag1,tag2_20190908_180610_0001")
-        self.assertEqual(info.tags, ())
-        self.assertIsNone(info.created)
-
-        # Pattern doesn't match (filename unaltered)
-        with self.settings(FILENAME_PARSE_TRANSFORMS=[(none_patt, "none.gif")]):
-            info = FileInfo.from_filename(filename)
-            self.assertEqual(info.title, "tag1,tag2_20190908_180610_0001")
-
-        # Simple transformation (match all)
-        with self.settings(FILENAME_PARSE_TRANSFORMS=[(all_patt, "all.gif")]):
-            info = FileInfo.from_filename(filename)
-            self.assertEqual(info.title, "all")
-
-        # Multiple transformations configured (first pattern matches)
-        with self.settings(
-            FILENAME_PARSE_TRANSFORMS=[
-                (all_patt, "all.gif"),
-                (all_patt, "anotherall.gif"),
-            ],
-        ):
-            info = FileInfo.from_filename(filename)
-            self.assertEqual(info.title, "all")
-
-        # Multiple transformations configured (second pattern matches)
-        with self.settings(
-            FILENAME_PARSE_TRANSFORMS=[
-                (none_patt, "none.gif"),
-                (all_patt, "anotherall.gif"),
-            ],
-        ):
-            info = FileInfo.from_filename(filename)
-            self.assertEqual(info.title, "anotherall")
+from paperless_mail.models import MailRule
+from paperless_mail.parsers import MailDocumentParser
 
 
 class _BaseTestParser(DocumentParser):
@@ -205,7 +65,7 @@ class CopyParser(_BaseTestParser):
 
     def parse(self, document_path, mime_type, file_name=None):
         self.text = "The text"
-        self.archive_path = os.path.join(self.tempdir, "archive.pdf")
+        self.archive_path = Path(self.tempdir / "archive.pdf")
         shutil.copy(document_path, self.archive_path)
 
 
@@ -233,16 +93,19 @@ class FaultyGenericExceptionParser(_BaseTestParser):
         raise Exception("Generic exception.")
 
 
-def fake_magic_from_file(file, mime=False):
+def fake_magic_from_file(file, *, mime=False):
     if mime:
-        if file.name.startswith("invalid_pdf"):
+        filepath = Path(file)
+        if filepath.name.startswith("invalid_pdf"):
             return "application/octet-stream"
-        if os.path.splitext(file)[1] == ".pdf":
+        if filepath.suffix == ".pdf":
             return "application/pdf"
-        elif os.path.splitext(file)[1] == ".png":
+        elif filepath.suffix == ".png":
             return "image/png"
-        elif os.path.splitext(file)[1] == ".webp":
+        elif filepath.suffix == ".webp":
             return "image/webp"
+        elif filepath.suffix == ".eml":
+            return "message/rfc822"
         else:
             return "unknown"
     else:
@@ -362,7 +225,7 @@ class TestConsumer(
         self.assertEqual(document.content, "The Text")
         self.assertEqual(
             document.title,
-            os.path.splitext(os.path.basename(filename))[0],
+            Path(filename).stem,
         )
         self.assertIsNone(document.correspondent)
         self.assertIsNone(document.document_type)
@@ -382,27 +245,16 @@ class TestConsumer(
 
         self._assert_first_last_send_progress()
 
-        # Convert UTC time from DB to local time
-        document_date_local = timezone.localtime(document.created)
-
-        self.assertEqual(
-            document_date_local.tzinfo,
-            zoneinfo.ZoneInfo("America/Chicago"),
-        )
-        self.assertEqual(document_date_local.tzinfo, rough_create_date_local.tzinfo)
-        self.assertEqual(document_date_local.year, rough_create_date_local.year)
-        self.assertEqual(document_date_local.month, rough_create_date_local.month)
-        self.assertEqual(document_date_local.day, rough_create_date_local.day)
-        self.assertEqual(document_date_local.hour, rough_create_date_local.hour)
-        self.assertEqual(document_date_local.minute, rough_create_date_local.minute)
-        # Skipping seconds and more precise
+        self.assertEqual(document.created.year, rough_create_date_local.year)
+        self.assertEqual(document.created.month, rough_create_date_local.month)
+        self.assertEqual(document.created.day, rough_create_date_local.day)
 
     @override_settings(FILENAME_FORMAT=None)
     def testDeleteMacFiles(self):
         # https://github.com/jonaswinkler/paperless-ng/discussions/1037
 
         filename = self.get_test_file()
-        shadow_file = os.path.join(self.dirs.scratch_dir, "._sample.pdf")
+        shadow_file = Path(self.dirs.scratch_dir) / "._sample.pdf"
 
         shutil.copy(filename, shadow_file)
 
@@ -451,22 +303,6 @@ class TestConsumer(
 
         self.assertEqual(document.title, "Override Title")
         self._assert_first_last_send_progress()
-
-    def testOverrideTitleInvalidPlaceholders(self):
-        with self.assertLogs("paperless.consumer", level="ERROR") as cm:
-            with self.get_consumer(
-                self.get_test_file(),
-                DocumentMetadataOverrides(title="Override {correspondent]"),
-            ) as consumer:
-                consumer.run()
-
-                document = Document.objects.first()
-
-            self.assertIsNotNone(document)
-
-            self.assertEqual(document.title, "sample")
-            expected_str = "Error occurred parsing title override 'Override {correspondent]', falling back to original"
-            self.assertIn(expected_str, cm.output[0])
 
     def testOverrideCorrespondent(self):
         c = Correspondent.objects.create(name="test")
@@ -543,7 +379,9 @@ class TestConsumer(
 
         with self.get_consumer(
             self.get_test_file(),
-            DocumentMetadataOverrides(custom_field_ids=[cf1.id, cf3.id]),
+            DocumentMetadataOverrides(
+                custom_fields={cf1.id: "value1", cf3.id: "http://example.com"},
+            ),
         ) as consumer:
             consumer.run()
 
@@ -555,6 +393,11 @@ class TestConsumer(
         self.assertIn(cf1, fields_used)
         self.assertNotIn(cf2, fields_used)
         self.assertIn(cf3, fields_used)
+        self.assertEqual(document.custom_fields.get(field=cf1).value, "value1")
+        self.assertEqual(
+            document.custom_fields.get(field=cf3).value,
+            "http://example.com",
+        )
         self._assert_first_last_send_progress()
 
     def testOverrideAsn(self):
@@ -569,6 +412,14 @@ class TestConsumer(
         self.assertEqual(document.archive_serial_number, 123)
         self._assert_first_last_send_progress()
 
+    def testMetadataOverridesSkipAsnPropagation(self):
+        overrides = DocumentMetadataOverrides()
+        incoming = DocumentMetadataOverrides(skip_asn=True)
+
+        overrides.update(incoming)
+
+        self.assertTrue(overrides.skip_asn)
+
     def testOverrideTitlePlaceholders(self):
         c = Correspondent.objects.create(name="Correspondent Name")
         dt = DocumentType.objects.create(name="DocType Name")
@@ -578,7 +429,7 @@ class TestConsumer(
             DocumentMetadataOverrides(
                 correspondent_id=c.pk,
                 document_type_id=dt.pk,
-                title="{correspondent}{document_type} {added_month}-{added_year_short}",
+                title="{{correspondent}}{{document_type}} {{added_month}}-{{added_year_short}}",
             ),
         ) as consumer:
             consumer.run()
@@ -625,8 +476,8 @@ class TestConsumer(
         self._assert_first_last_send_progress()
 
     def testNotAFile(self):
-        with self.get_consumer(Path("non-existing-file")) as consumer:
-            with self.assertRaisesMessage(ConsumerError, "File not found"):
+        with self.assertRaisesMessage(ConsumerError, "File not found"):
+            with self.get_consumer(Path("non-existing-file")) as consumer:
                 consumer.run()
         self._assert_first_last_send_progress(last_status="FAILED")
 
@@ -634,8 +485,8 @@ class TestConsumer(
         with self.get_consumer(self.get_test_file()) as consumer:
             consumer.run()
 
-        with self.get_consumer(self.get_test_file()) as consumer:
-            with self.assertRaisesMessage(ConsumerError, "It is a duplicate"):
+        with self.assertRaisesMessage(ConsumerError, "It is a duplicate"):
+            with self.get_consumer(self.get_test_file()) as consumer:
                 consumer.run()
 
         self._assert_first_last_send_progress(last_status="FAILED")
@@ -644,8 +495,8 @@ class TestConsumer(
         with self.get_consumer(self.get_test_file()) as consumer:
             consumer.run()
 
-        with self.get_consumer(self.get_test_archive_file()) as consumer:
-            with self.assertRaisesMessage(ConsumerError, "It is a duplicate"):
+        with self.assertRaisesMessage(ConsumerError, "It is a duplicate"):
+            with self.get_consumer(self.get_test_archive_file()) as consumer:
                 consumer.run()
 
         self._assert_first_last_send_progress(last_status="FAILED")
@@ -662,8 +513,8 @@ class TestConsumer(
 
         Document.objects.all().delete()
 
-        with self.get_consumer(self.get_test_file()) as consumer:
-            with self.assertRaisesMessage(ConsumerError, "document is in the trash"):
+        with self.assertRaisesMessage(ConsumerError, "document is in the trash"):
+            with self.get_consumer(self.get_test_file()) as consumer:
                 consumer.run()
 
     def testAsnExists(self):
@@ -673,11 +524,11 @@ class TestConsumer(
         ) as consumer:
             consumer.run()
 
-        with self.get_consumer(
-            self.get_test_file2(),
-            DocumentMetadataOverrides(asn=123),
-        ) as consumer:
-            with self.assertRaisesMessage(ConsumerError, "ASN 123 already exists"):
+        with self.assertRaisesMessage(ConsumerError, "ASN 123 already exists"):
+            with self.get_consumer(
+                self.get_test_file2(),
+                DocumentMetadataOverrides(asn=123),
+            ) as consumer:
                 consumer.run()
 
     def testAsnExistsInTrash(self):
@@ -690,22 +541,22 @@ class TestConsumer(
             document = Document.objects.first()
             document.delete()
 
-        with self.get_consumer(
-            self.get_test_file2(),
-            DocumentMetadataOverrides(asn=123),
-        ) as consumer:
-            with self.assertRaisesMessage(ConsumerError, "document is in the trash"):
+        with self.assertRaisesMessage(ConsumerError, "document is in the trash"):
+            with self.get_consumer(
+                self.get_test_file2(),
+                DocumentMetadataOverrides(asn=123),
+            ) as consumer:
                 consumer.run()
 
     @mock.patch("documents.parsers.document_consumer_declaration.send")
     def testNoParsers(self, m):
         m.return_value = []
 
-        with self.get_consumer(self.get_test_file()) as consumer:
-            with self.assertRaisesMessage(
-                ConsumerError,
-                "sample.pdf: Unsupported mime type application/pdf",
-            ):
+        with self.assertRaisesMessage(
+            ConsumerError,
+            "sample.pdf: Unsupported mime type application/pdf",
+        ):
+            with self.get_consumer(self.get_test_file()) as consumer:
                 consumer.run()
 
         self._assert_first_last_send_progress(last_status="FAILED")
@@ -867,8 +718,8 @@ class TestConsumer(
         dst = self.get_test_file()
         self.assertIsFile(dst)
 
-        with self.get_consumer(dst) as consumer:
-            with self.assertRaises(ConsumerError):
+        with self.assertRaises(ConsumerError):
+            with self.get_consumer(dst) as consumer:
                 consumer.run()
 
         self.assertIsNotFile(dst)
@@ -892,11 +743,11 @@ class TestConsumer(
         dst = self.get_test_file()
         self.assertIsFile(dst)
 
-        with self.get_consumer(dst) as consumer:
-            with self.assertRaisesRegex(
-                ConsumerError,
-                r"sample\.pdf: Not consuming sample\.pdf: It is a duplicate of sample \(#\d+\)",
-            ):
+        with self.assertRaisesRegex(
+            ConsumerError,
+            r"sample\.pdf: Not consuming sample\.pdf: It is a duplicate of sample \(#\d+\)",
+        ):
+            with self.get_consumer(dst) as consumer:
                 consumer.run()
 
         self.assertIsFile(dst)
@@ -975,6 +826,59 @@ class TestConsumer(
             self.assertEqual(command[0], "qpdf")
             self.assertEqual(command[1], "--replace-input")
 
+    @mock.patch("paperless_mail.models.MailRule.objects.get")
+    @mock.patch("paperless_mail.parsers.MailDocumentParser.parse")
+    @mock.patch("documents.parsers.document_consumer_declaration.send")
+    def test_mail_parser_receives_mailrule(
+        self,
+        mock_consumer_declaration_send: mock.Mock,
+        mock_mail_parser_parse: mock.Mock,
+        mock_mailrule_get: mock.Mock,
+    ):
+        """
+        GIVEN:
+            - A mail document from a mail rule
+        WHEN:
+            - The consumer is run
+        THEN:
+            - The mail parser should receive the mail rule
+        """
+        mock_consumer_declaration_send.return_value = [
+            (
+                None,
+                {
+                    "parser": MailDocumentParser,
+                    "mime_types": {"message/rfc822": ".eml"},
+                    "weight": 0,
+                },
+            ),
+        ]
+        mock_mailrule_get.return_value = mock.Mock(
+            pdf_layout=MailRule.PdfLayout.HTML_ONLY,
+        )
+        with self.get_consumer(
+            filepath=(
+                Path(__file__).parent.parent.parent
+                / Path("paperless_mail")
+                / Path("tests")
+                / Path("samples")
+            ).resolve()
+            / "html.eml",
+            source=DocumentSource.MailFetch,
+            mailrule_id=1,
+        ) as consumer:
+            # fails because no gotenberg
+            with self.assertRaises(
+                ConsumerError,
+            ):
+                consumer.run()
+                mock_mail_parser_parse.assert_called_once_with(
+                    consumer.working_copy,
+                    "message/rfc822",
+                    file_name="sample.pdf",
+                    mailrule=mock_mailrule_get.return_value,
+                )
+
 
 @mock.patch("documents.consumer.magic.from_file", fake_magic_from_file)
 class TestConsumerCreatedDate(DirectoriesMixin, GetConsumerMixin, TestCase):
@@ -1006,7 +910,7 @@ class TestConsumerCreatedDate(DirectoriesMixin, GetConsumerMixin, TestCase):
 
         self.assertEqual(
             document.created,
-            datetime.datetime(1996, 2, 20, tzinfo=tz.gettz(settings.TIME_ZONE)),
+            datetime.date(1996, 2, 20),
         )
 
     @override_settings(FILENAME_DATE_ORDER="YMD")
@@ -1036,7 +940,7 @@ class TestConsumerCreatedDate(DirectoriesMixin, GetConsumerMixin, TestCase):
 
         self.assertEqual(
             document.created,
-            datetime.datetime(2022, 2, 1, tzinfo=tz.gettz(settings.TIME_ZONE)),
+            datetime.date(2022, 2, 1),
         )
 
     def test_consume_date_filename_date_use_content(self):
@@ -1066,7 +970,7 @@ class TestConsumerCreatedDate(DirectoriesMixin, GetConsumerMixin, TestCase):
 
         self.assertEqual(
             document.created,
-            datetime.datetime(1996, 2, 20, tzinfo=tz.gettz(settings.TIME_ZONE)),
+            datetime.date(1996, 2, 20),
         )
 
     @override_settings(
@@ -1098,7 +1002,7 @@ class TestConsumerCreatedDate(DirectoriesMixin, GetConsumerMixin, TestCase):
 
         self.assertEqual(
             document.created,
-            datetime.datetime(1997, 2, 20, tzinfo=tz.gettz(settings.TIME_ZONE)),
+            datetime.date(1997, 2, 20),
         )
 
 
@@ -1170,8 +1074,8 @@ class PreConsumeTestCase(DirectoriesMixin, GetConsumerMixin, TestCase):
                 outfile.write("echo This message goes to stderr >&2")
 
             # Make the file executable
-            st = os.stat(script.name)
-            os.chmod(script.name, st.st_mode | stat.S_IEXEC)
+            st = Path(script.name).stat()
+            Path(script.name).chmod(st.st_mode | stat.S_IEXEC)
 
             with override_settings(PRE_CONSUME_SCRIPT=script.name):
                 with self.assertLogs("paperless.consumer", level="INFO") as cm:
@@ -1202,8 +1106,8 @@ class PreConsumeTestCase(DirectoriesMixin, GetConsumerMixin, TestCase):
                 outfile.write("exit 100\n")
 
             # Make the file executable
-            st = os.stat(script.name)
-            os.chmod(script.name, st.st_mode | stat.S_IEXEC)
+            st = Path(script.name).stat()
+            Path(script.name).chmod(st.st_mode | stat.S_IEXEC)
 
             with override_settings(PRE_CONSUME_SCRIPT=script.name):
                 with self.get_consumer(self.test_file) as c:
@@ -1262,12 +1166,16 @@ class PostConsumeTestCase(DirectoriesMixin, GetConsumerMixin, TestCase):
                 m.assert_called_once()
 
     @mock.patch("documents.consumer.run_subprocess")
-    def test_post_consume_script_with_correspondent(self, m):
+    def test_post_consume_script_with_correspondent_and_type(self, m):
         with tempfile.NamedTemporaryFile() as script:
             with override_settings(POST_CONSUME_SCRIPT=script.name):
                 c = Correspondent.objects.create(name="my_bank")
+                t = DocumentType.objects.create(
+                    name="Test type",
+                )
                 doc = Document.objects.create(
                     title="Test",
+                    document_type=t,
                     mime_type="application/pdf",
                     correspondent=c,
                 )
@@ -1295,6 +1203,7 @@ class PostConsumeTestCase(DirectoriesMixin, GetConsumerMixin, TestCase):
 
                 subset = {
                     "DOCUMENT_ID": str(doc.pk),
+                    "DOCUMENT_TYPE": "Test type",
                     "DOCUMENT_DOWNLOAD_URL": f"/api/documents/{doc.pk}/download/",
                     "DOCUMENT_THUMBNAIL_URL": f"/api/documents/{doc.pk}/thumb/",
                     "DOCUMENT_CORRESPONDENT": "my_bank",
@@ -1320,8 +1229,8 @@ class PostConsumeTestCase(DirectoriesMixin, GetConsumerMixin, TestCase):
                 outfile.write("exit -500\n")
 
             # Make the file executable
-            st = os.stat(script.name)
-            os.chmod(script.name, st.st_mode | stat.S_IEXEC)
+            st = Path(script.name).stat()
+            Path(script.name).chmod(st.st_mode | stat.S_IEXEC)
 
             with override_settings(POST_CONSUME_SCRIPT=script.name):
                 doc = Document.objects.create(title="Test", mime_type="application/pdf")

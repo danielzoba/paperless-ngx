@@ -1,8 +1,8 @@
 import { AsyncPipe } from '@angular/common'
-import { Component, OnDestroy, OnInit } from '@angular/core'
+import { Component, OnDestroy, OnInit, inject } from '@angular/core'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
 import { ActivatedRoute } from '@angular/router'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import { NgbDropdownModule, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { Subject, delay, first, takeUntil, tap } from 'rxjs'
 import { MailAccount, MailAccountType } from 'src/app/data/mail-account'
@@ -27,6 +27,7 @@ import { MailRuleEditDialogComponent } from '../../common/edit-dialog/mail-rule-
 import { PageHeaderComponent } from '../../common/page-header/page-header.component'
 import { PermissionsDialogComponent } from '../../common/permissions-dialog/permissions-dialog.component'
 import { ComponentWithPermissions } from '../../with-permissions/with-permissions.component'
+import { ProcessedMailDialogComponent } from './processed-mail-dialog/processed-mail-dialog.component'
 
 @Component({
   selector: 'pngx-mail',
@@ -39,6 +40,7 @@ import { ComponentWithPermissions } from '../../with-permissions/with-permission
     AsyncPipe,
     FormsModule,
     ReactiveFormsModule,
+    NgbDropdownModule,
     NgxBootstrapIconsModule,
   ],
 })
@@ -46,6 +48,14 @@ export class MailComponent
   extends ComponentWithPermissions
   implements OnInit, OnDestroy
 {
+  mailAccountService = inject(MailAccountService)
+  mailRuleService = inject(MailRuleService)
+  private toastService = inject(ToastService)
+  private modalService = inject(NgbModal)
+  permissionsService = inject(PermissionsService)
+  private settingsService = inject(SettingsService)
+  private route = inject(ActivatedRoute)
+
   public MailAccountType = MailAccountType
 
   mailAccounts: MailAccount[] = []
@@ -66,18 +76,6 @@ export class MailComponent
   public showRules: boolean = false
   public loadingAccounts: boolean = true
   public showAccounts: boolean = false
-
-  constructor(
-    public mailAccountService: MailAccountService,
-    public mailRuleService: MailRuleService,
-    private toastService: ToastService,
-    private modalService: NgbModal,
-    public permissionsService: PermissionsService,
-    private settingsService: SettingsService,
-    private route: ActivatedRoute
-  ) {
-    super()
-  }
 
   ngOnInit(): void {
     this.mailAccountService
@@ -199,7 +197,9 @@ export class MailComponent
       this.mailAccountService.delete(account).subscribe({
         next: () => {
           modal.close()
-          this.toastService.showInfo($localize`Deleted mail account`)
+          this.toastService.showInfo(
+            $localize`Deleted mail account "${account.name}"`
+          )
           this.mailAccountService.clearCache()
           this.mailAccountService
             .listAll(null, null, { full_perms: true })
@@ -209,7 +209,7 @@ export class MailComponent
         },
         error: (e) => {
           this.toastService.showError(
-            $localize`Error deleting mail account.`,
+            $localize`Error deleting mail account "${account.name}".`,
             e
           )
         },
@@ -220,10 +220,15 @@ export class MailComponent
   processAccount(account: MailAccount) {
     this.mailAccountService.processAccount(account).subscribe({
       next: () => {
-        this.toastService.showInfo($localize`Processing mail account`)
+        this.toastService.showInfo(
+          $localize`Processing mail account "${account.name}"`
+        )
       },
       error: (e) => {
-        this.toastService.showError($localize`Error processing mail account`, e)
+        this.toastService.showError(
+          $localize`Error processing mail account "${account.name}"`,
+          e
+        )
       },
     })
   }
@@ -271,7 +276,10 @@ export class MailComponent
         )
       },
       error: (e) => {
-        this.toastService.showError($localize`Error toggling rule.`, e)
+        this.toastService.showError(
+          $localize`Error toggling rule "${rule.name}".`,
+          e
+        )
       },
     })
   }
@@ -290,7 +298,9 @@ export class MailComponent
       this.mailRuleService.delete(rule).subscribe({
         next: () => {
           modal.close()
-          this.toastService.showInfo($localize`Deleted mail rule`)
+          this.toastService.showInfo(
+            $localize`Deleted mail rule "${rule.name}"`
+          )
           this.mailRuleService.clearCache()
           this.mailRuleService
             .listAll(null, null, { full_perms: true })
@@ -299,7 +309,10 @@ export class MailComponent
             })
         },
         error: (e) => {
-          this.toastService.showError($localize`Error deleting mail rule.`, e)
+          this.toastService.showError(
+            $localize`Error deleting mail rule "${rule.name}".`,
+            e
+          )
         },
       })
     })
@@ -333,6 +346,14 @@ export class MailComponent
         })
       }
     )
+  }
+
+  viewProcessedMail(rule: MailRule) {
+    const modal = this.modalService.open(ProcessedMailDialogComponent, {
+      backdrop: 'static',
+      size: 'xl',
+    })
+    modal.componentInstance.rule = rule
   }
 
   userCanEdit(obj: ObjectWithPermissions): boolean {

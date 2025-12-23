@@ -1,4 +1,5 @@
-import datetime
+from __future__ import annotations
+
 import logging
 import mimetypes
 import os
@@ -6,10 +7,10 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 from re import Match
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 from django.utils import timezone
@@ -18,6 +19,12 @@ from documents.loggers import LoggingMixin
 from documents.signals import document_consumer_declaration
 from documents.utils import copy_file_with_basic_stats
 from documents.utils import run_subprocess
+from paperless.config import OcrConfig
+from paperless.utils import ocr_to_dateparser_languages
+
+if TYPE_CHECKING:
+    import datetime
+    from collections.abc import Iterator
 
 # This regular expression will try to find dates in the document at
 # hand and will match the following formats:
@@ -41,7 +48,7 @@ DATE_REGEX = re.compile(
     r"(\b|(?!=([_-])))(\d{1,2}[\. ]+[a-zéûäëčžúřěáíóńźçŞğü]{3,9} \d{4}|[a-zéûäëčžúřěáíóńźçŞğü]{3,9} \d{1,2}, \d{4})(\b|(?=([_-])))|"
     r"(\b|(?!=([_-])))([^\W\d_]{3,9} \d{1,2}, (\d{4}))(\b|(?=([_-])))|"
     r"(\b|(?!=([_-])))([^\W\d_]{3,9} \d{4})(\b|(?=([_-])))|"
-    r"(\b|(?!=([_-])))(\d{1,2}[^ ]{2}[\. ]+[^ ]{3,9}[ \.\/-]\d{4})(\b|(?=([_-])))|"
+    r"(\b|(?!=([_-])))(\d{1,2}[^ 0-9]{2}[\. ]+[^ ]{3,9}[ \.\/-]\d{4})(\b|(?=([_-])))|"
     r"(\b|(?!=([_-])))(\b\d{1,2}[ \.\/-][a-zéûäëčžúřěáíóńźçŞğü]{3}[ \.\/-]\d{4})(\b|(?=([_-])))",
     re.IGNORECASE,
 )
@@ -106,7 +113,7 @@ def get_supported_file_extensions() -> set[str]:
     return extensions
 
 
-def get_parser_class_for_mime_type(mime_type: str) -> type["DocumentParser"] | None:
+def get_parser_class_for_mime_type(mime_type: str) -> type[DocumentParser] | None:
     """
     Returns the best parser (by weight) for the given mimetype or
     None if no parser exists
@@ -133,6 +140,7 @@ def get_parser_class_for_mime_type(mime_type: str) -> type["DocumentParser"] | N
 def run_convert(
     input_file,
     output_file,
+    *,
     density=None,
     scale=None,
     alpha=None,
@@ -161,7 +169,7 @@ def run_convert(
     args += ["-depth", str(depth)] if depth else []
     args += ["-auto-orient"] if auto_orient else []
     args += ["-define", "pdf:use-cropbox=true"] if use_cropbox else []
-    args += [input_file, output_file]
+    args += [str(input_file), str(output_file)]
 
     logger.debug("Execute: " + " ".join(args), extra={"group": logging_group})
 
@@ -180,8 +188,8 @@ def get_default_thumbnail() -> Path:
     return (Path(__file__).parent / "resources" / "document.webp").resolve()
 
 
-def make_thumbnail_from_pdf_gs_fallback(in_path, temp_dir, logging_group=None) -> str:
-    out_path = os.path.join(temp_dir, "convert_gs.webp")
+def make_thumbnail_from_pdf_gs_fallback(in_path, temp_dir, logging_group=None) -> Path:
+    out_path: Path = Path(temp_dir) / "convert_gs.webp"
 
     # if convert fails, fall back to extracting
     # the first PDF page as a PNG using Ghostscript
@@ -191,7 +199,7 @@ def make_thumbnail_from_pdf_gs_fallback(in_path, temp_dir, logging_group=None) -
         extra={"group": logging_group},
     )
     # Ghostscript doesn't handle WebP outputs
-    gs_out_path = os.path.join(temp_dir, "gs_out.png")
+    gs_out_path: Path = Path(temp_dir) / "gs_out.png"
     cmd = [settings.GS_BINARY, "-q", "-sDEVICE=pngalpha", "-o", gs_out_path, in_path]
 
     try:
@@ -219,16 +227,16 @@ def make_thumbnail_from_pdf_gs_fallback(in_path, temp_dir, logging_group=None) -
         # The caller might expect a generated thumbnail that can be moved,
         # so we need to copy it before it gets moved.
         # https://github.com/paperless-ngx/paperless-ngx/issues/3631
-        default_thumbnail_path = os.path.join(temp_dir, "document.webp")
+        default_thumbnail_path: Path = Path(temp_dir) / "document.webp"
         copy_file_with_basic_stats(get_default_thumbnail(), default_thumbnail_path)
         return default_thumbnail_path
 
 
-def make_thumbnail_from_pdf(in_path, temp_dir, logging_group=None) -> Path:
+def make_thumbnail_from_pdf(in_path: Path, temp_dir: Path, logging_group=None) -> Path:
     """
     The thumbnail of a PDF is just a 500px wide image of the first page.
     """
-    out_path = temp_dir / "convert.webp"
+    out_path: Path = temp_dir / "convert.webp"
 
     # Run convert to get a decent thumbnail
     try:
@@ -266,6 +274,11 @@ def parse_date_generator(filename, text) -> Iterator[datetime.datetime]:
         """
         import dateparser
 
+        ocr_config = OcrConfig()
+        languages = settings.DATE_PARSER_LANGUAGES or ocr_to_dateparser_languages(
+            ocr_config.language,
+        )
+
         return dateparser.parse(
             ds,
             settings={
@@ -274,6 +287,7 @@ def parse_date_generator(filename, text) -> Iterator[datetime.datetime]:
                 "RETURN_AS_TIMEZONE_AWARE": True,
                 "TIMEZONE": settings.TIME_ZONE,
             },
+            locales=languages,
         )
 
     def __filter(date: datetime.datetime) -> datetime.datetime | None:

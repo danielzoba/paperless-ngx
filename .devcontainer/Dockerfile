@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM --platform=$BUILDPLATFORM docker.io/node:20-bookworm-slim as main-app
+FROM --platform=$BUILDPLATFORM docker.io/node:20-trixie-slim as main-app
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -8,16 +8,17 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG TARGETARCH
 
 # Can be workflow provided, defaults set for manual building
-ARG JBIG2ENC_VERSION=0.29
-ARG QPDF_VERSION=11.9.0
-ARG GS_VERSION=10.03.1
+ARG JBIG2ENC_VERSION=0.30
 
 # Set Python environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     # Ignore warning from Whitenoise
     PYTHONWARNINGS="ignore:::django.http.response:517" \
-    PNGX_CONTAINERIZED=1
+    PNGX_CONTAINERIZED=1 \
+    # https://docs.astral.sh/uv/reference/settings/#link-mode
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/cache/uv/
 
 #
 # Begin installation and configuration
@@ -76,46 +77,22 @@ RUN set -eux \
     && apt-get update \
     && apt-get install --yes --quiet --no-install-recommends ${RUNTIME_PACKAGES}
 
-ARG PYTHON_PACKAGES="\
-  python3 \
-  python3-pip \
-  python3-wheel \
-  pipenv \
-  ca-certificates"
+ARG PYTHON_PACKAGES="ca-certificates"
 
 RUN set -eux \
   echo "Installing python packages" \
     && apt-get update \
     && apt-get install --yes --quiet ${PYTHON_PACKAGES}
 
+COPY --from=ghcr.io/astral-sh/uv:0.9.10 /uv /bin/uv
+
+
 RUN set -eux \
   && echo "Installing pre-built updates" \
-    && echo "Installing qpdf ${QPDF_VERSION}" \
-      && curl --fail --silent --show-error --location \
-        --output libqpdf29_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-        https://github.com/paperless-ngx/builder/releases/download/qpdf-${QPDF_VERSION}/libqpdf29_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-      && curl --fail --silent --show-error --location \
-        --output qpdf_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-        https://github.com/paperless-ngx/builder/releases/download/qpdf-${QPDF_VERSION}/qpdf_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-      && dpkg --install ./libqpdf29_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-      && dpkg --install ./qpdf_${QPDF_VERSION}-1_${TARGETARCH}.deb \
-    && echo "Installing Ghostscript ${GS_VERSION}" \
-      && curl --fail --silent --show-error --location \
-          --output libgs10_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
-      && curl --fail --silent --show-error --location \
-          --output ghostscript_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/ghostscript_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
-      && curl --fail --silent --show-error --location \
-          --output libgs10-common_${GS_VERSION}.dfsg-1_all.deb \
-          https://github.com/paperless-ngx/builder/releases/download/ghostscript-${GS_VERSION}/libgs10-common_${GS_VERSION}.dfsg-1_all.deb \
-        && dpkg --install ./libgs10-common_${GS_VERSION}.dfsg-1_all.deb \
-        && dpkg --install ./libgs10_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
-        && dpkg --install ./ghostscript_${GS_VERSION}.dfsg-1_${TARGETARCH}.deb \
     && echo "Installing jbig2enc" \
       && curl --fail --silent --show-error --location \
         --output jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
-        https://github.com/paperless-ngx/builder/releases/download/jbig2enc-${JBIG2ENC_VERSION}/jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
+        https://github.com/paperless-ngx/builder/releases/download/jbig2enc-trixie-v${JBIG2ENC_VERSION}/jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
       && dpkg --install ./jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb
 
 # setup docker-specific things
@@ -123,13 +100,15 @@ RUN set -eux \
 WORKDIR /usr/src/paperless/src/docker/
 
 COPY [ \
-  "docker/imagemagick-policy.xml", \
+  "docker/rootfs/etc/ImageMagick-6/paperless-policy.xml", \
   "./" \
 ]
 
 RUN set -eux \
   && echo "Configuring ImageMagick" \
-    && mv imagemagick-policy.xml /etc/ImageMagick-6/policy.xml
+    && mkdir -p /etc/ImageMagick-6 \
+    && mv paperless-policy.xml /etc/ImageMagick-6/policy.xml
+
 
 # Packages needed only for building a few quick Python
 # dependencies
@@ -140,18 +119,17 @@ ARG BUILD_PACKAGES="\
   libpq-dev \
   # https://github.com/PyMySQL/mysqlclient#linux
   default-libmysqlclient-dev \
-  pkg-config \
-  pre-commit"
+  pkg-config"
 
 # hadolint ignore=DL3042
-RUN --mount=type=cache,target=/root/.cache/pip/,id=pip-cache \
+RUN --mount=type=cache,target=/cache/uv/,id=uv-cache \
   set -eux \
   && echo "Installing build system packages" \
     && apt-get update \
     && apt-get install --yes --quiet ${BUILD_PACKAGES}
 
 RUN set -eux \
-  && npm update npm -g
+  && npm update -g pnpm
 
 # add users, setup scripts
 # Mount the compiled frontend to expected location
@@ -169,9 +147,6 @@ RUN set -eux \
     && mkdir --parents --verbose /usr/src/paperless/paperless-ngx/.venv \
   && echo "Adjusting all permissions" \
     && chown --from root:root --changes --recursive paperless:paperless /usr/src/paperless
-#  && echo "Collecting static files" \
-#    && gosu paperless python3 manage.py collectstatic --clear --no-input --link \
-#    && gosu paperless python3 manage.py compilemessages
 
 VOLUME ["/usr/src/paperless/paperless-ngx/data", \
         "/usr/src/paperless/paperless-ngx/media", \

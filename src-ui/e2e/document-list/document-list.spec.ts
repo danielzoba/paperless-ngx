@@ -83,10 +83,17 @@ test('date filtering', async ({ page }) => {
   await page.routeFromHAR(REQUESTS_HAR3, { notFound: 'fallback' })
   await page.goto('/documents')
   await page.getByRole('button', { name: 'Dates' }).click()
-  await page.getByRole('menuitem', { name: 'Last 3 months' }).first().click()
+  await page.locator('.ng-arrow-wrapper').first().click()
+  await page.getByRole('option', { name: 'Within 3 months' }).click()
   await expect(page.locator('pngx-document-list')).toHaveText(/one document/i)
-  await page.getByRole('menuitem', { name: 'Last 3 months' }).first().click()
-  await page.getByLabel('Datesselected').getByRole('button').first().click()
+  await page
+    .getByRole('menuitem', { name: 'Relative dates' })
+    .locator('span')
+    .first()
+    .click()
+  await page.getByRole('option', { name: 'Within 3 months' }).click()
+  await page.getByLabel('Dates selected').locator('button').first().click()
+  await page.getByLabel('Dates selected').locator('button').first().click()
   await page.getByRole('combobox', { name: 'Select month' }).selectOption('12')
   await page.getByRole('combobox', { name: 'Select year' }).selectOption('2022')
   await page.getByText('11', { exact: true }).click()
@@ -135,11 +142,11 @@ test('sorting', async ({ page }) => {
 test('change views', async ({ page }) => {
   await page.routeFromHAR(REQUESTS_HAR5, { notFound: 'fallback' })
   await page.goto('/documents')
-  await page.locator('.btn-group label').first().click()
+  await page.locator('.btn-group > label').first().click()
   await expect(page.locator('pngx-document-list table')).toBeVisible()
-  await page.locator('.btn-group label').nth(1).click()
+  await page.locator('label:nth-child(4)').first().click()
   await expect(page.locator('pngx-document-card-small').first()).toBeAttached()
-  await page.locator('.btn-group label').nth(2).click()
+  await page.locator('label:nth-child(6)').click()
   await expect(page.locator('pngx-document-card-large').first()).toBeAttached()
 })
 
@@ -167,7 +174,7 @@ test('bulk edit', async ({ page }) => {
   await expect(page.locator('pngx-document-list')).toHaveText(
     /Selected 61 of 61 documents/i
   )
-  await page.getByRole('button', { name: 'Cancel' }).click()
+  await page.getByRole('button', { name: 'None' }).click()
 
   await page.locator('pngx-document-card-small').nth(1).click()
   await page.locator('pngx-document-card-small').nth(2).click()

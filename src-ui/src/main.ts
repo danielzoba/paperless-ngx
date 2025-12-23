@@ -27,12 +27,14 @@ import {
   arrowClockwise,
   arrowCounterclockwise,
   arrowDown,
+  arrowDownUp,
   arrowLeft,
   arrowRepeat,
   arrowRight,
   arrowRightShort,
   arrowUpRight,
   asterisk,
+  bell,
   bodyText,
   boxArrowUp,
   boxArrowUpRight,
@@ -49,14 +51,17 @@ import {
   check,
   check2All,
   checkAll,
+  checkCircle,
   checkCircleFill,
   checkLg,
   chevronDoubleLeft,
   chevronDoubleRight,
+  chevronRight,
   clipboard,
   clipboardCheck,
   clipboardCheckFill,
   clipboardFill,
+  clockHistory,
   dash,
   dashCircle,
   diagram3,
@@ -92,6 +97,7 @@ import {
   infoCircle,
   journals,
   link,
+  listNested,
   listTask,
   listUl,
   microsoft,
@@ -105,11 +111,14 @@ import {
   personFillLock,
   personLock,
   personSquare,
+  playFill,
   plus,
   plusCircle,
+  printer,
   questionCircle,
   scissors,
   search,
+  send,
   slashCircle,
   sliders2Vertical,
   sortAlphaDown,
@@ -131,7 +140,6 @@ import {
 } from 'ngx-bootstrap-icons'
 import { ColorSliderModule } from 'ngx-color/slider'
 import { CookieService } from 'ngx-cookie-service'
-import { NgxFileDropModule } from 'ngx-file-drop'
 import { TourNgBootstrapModule } from 'ngx-ui-tour-ng-bootstrap'
 import { AppRoutingModule } from './app/app-routing.module'
 import { AppComponent } from './app/app.component'
@@ -159,6 +167,7 @@ import localeDe from '@angular/common/locales/de'
 import localeEl from '@angular/common/locales/el'
 import localeEnGb from '@angular/common/locales/en-GB'
 import localeEs from '@angular/common/locales/es'
+import localeFa from '@angular/common/locales/fa'
 import localeFi from '@angular/common/locales/fi'
 import localeFr from '@angular/common/locales/fr'
 import localeHu from '@angular/common/locales/hu'
@@ -178,7 +187,12 @@ import localeSr from '@angular/common/locales/sr'
 import localeSv from '@angular/common/locales/sv'
 import localeTr from '@angular/common/locales/tr'
 import localeUk from '@angular/common/locales/uk'
+import localeVi from '@angular/common/locales/vi'
 import localeZh from '@angular/common/locales/zh'
+import localeZhHant from '@angular/common/locales/zh-Hant'
+import { CorrespondentNamePipe } from './app/pipes/correspondent-name.pipe'
+import { DocumentTypeNamePipe } from './app/pipes/document-type-name.pipe'
+import { StoragePathNamePipe } from './app/pipes/storage-path-name.pipe'
 
 registerLocaleData(localeAf)
 registerLocaleData(localeAr)
@@ -191,6 +205,7 @@ registerLocaleData(localeDe)
 registerLocaleData(localeEl)
 registerLocaleData(localeEnGb)
 registerLocaleData(localeEs)
+registerLocaleData(localeFa)
 registerLocaleData(localeFi)
 registerLocaleData(localeFr)
 registerLocaleData(localeHu)
@@ -210,8 +225,10 @@ registerLocaleData(localeSl)
 registerLocaleData(localeSr)
 registerLocaleData(localeSv)
 registerLocaleData(localeTr)
+registerLocaleData(localeVi)
 registerLocaleData(localeUk)
 registerLocaleData(localeZh)
+registerLocaleData(localeZhHant)
 
 function initializeApp(settings: SettingsService) {
   return () => {
@@ -224,12 +241,14 @@ const icons = {
   arrowClockwise,
   arrowCounterclockwise,
   arrowDown,
+  arrowDownUp,
   arrowLeft,
   arrowRepeat,
   arrowRight,
   arrowRightShort,
   arrowUpRight,
   asterisk,
+  bell,
   braces,
   bodyText,
   boxArrowUp,
@@ -246,14 +265,17 @@ const icons = {
   check,
   check2All,
   checkAll,
+  checkCircle,
   checkCircleFill,
   checkLg,
   chevronDoubleLeft,
   chevronDoubleRight,
+  chevronRight,
   clipboard,
   clipboardCheck,
   clipboardCheckFill,
   clipboardFill,
+  clockHistory,
   dash,
   dashCircle,
   diagram3,
@@ -289,6 +311,7 @@ const icons = {
   infoCircle,
   journals,
   link,
+  listNested,
   listTask,
   listUl,
   microsoft,
@@ -302,11 +325,14 @@ const icons = {
   personFillLock,
   personLock,
   personSquare,
+  playFill,
   plus,
   plusCircle,
+  printer,
   questionCircle,
   scissors,
   search,
+  send,
   slashCircle,
   sliders2Vertical,
   sortAlphaDown,
@@ -340,7 +366,6 @@ bootstrapApplication(AppComponent, {
       FormsModule,
       ReactiveFormsModule,
       PdfViewerModule,
-      NgxFileDropModule,
       NgSelectModule,
       ColorSliderModule,
       TourNgBootstrapModule,
@@ -373,6 +398,9 @@ bootstrapApplication(AppComponent, {
     DirtyDocGuard,
     DirtySavedViewGuard,
     UsernamePipe,
+    CorrespondentNamePipe,
+    DocumentTypeNamePipe,
+    StoragePathNamePipe,
     provideHttpClient(withInterceptorsFromDi()),
   ],
 }).catch((err) => console.error(err))

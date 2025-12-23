@@ -1,8 +1,12 @@
 import json
 import logging
 import os
+import tempfile
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from zipfile import ZipFile
+from zipfile import is_zipfile
 
 import tqdm
 from django.conf import settings
@@ -44,12 +48,13 @@ if settings.AUDIT_LOG_ENABLED:
 
 
 @contextmanager
-def disable_signal(sig, receiver, sender):
+def disable_signal(sig, receiver, sender, *, weak: bool | None = None) -> Generator:
     try:
         sig.disconnect(receiver=receiver, sender=sender)
         yield
     finally:
-        sig.connect(receiver=receiver, sender=sender)
+        kwargs = {"weak": weak} if weak is not None else {}
+        sig.connect(receiver=receiver, sender=sender, **kwargs)
 
 
 class Command(CryptMixin, BaseCommand):
@@ -58,7 +63,7 @@ class Command(CryptMixin, BaseCommand):
         "documents it refers to."
     )
 
-    def add_arguments(self, parser):
+    def add_arguments(self, parser) -> None:
         parser.add_argument("source")
 
         parser.add_argument(
@@ -90,7 +95,7 @@ class Command(CryptMixin, BaseCommand):
         - Are there existing users or documents in the database?
         """
 
-        def pre_check_maybe_not_empty():
+        def pre_check_maybe_not_empty() -> None:
             # Skip this check if operating only on the database
             # We can expect data to exist in that case
             if not self.data_only:
@@ -122,7 +127,7 @@ class Command(CryptMixin, BaseCommand):
                     ),
                 )
 
-        def pre_check_manifest_exists():
+        def pre_check_manifest_exists() -> None:
             if not (self.source / "manifest.json").exists():
                 raise CommandError(
                     "That directory doesn't appear to contain a manifest.json file.",
@@ -141,7 +146,7 @@ class Command(CryptMixin, BaseCommand):
         """
         Loads manifest data from the various JSON files for parsing and loading the database
         """
-        main_manifest_path = self.source / "manifest.json"
+        main_manifest_path: Path = self.source / "manifest.json"
 
         with main_manifest_path.open() as infile:
             self.manifest = json.load(infile)
@@ -158,8 +163,8 @@ class Command(CryptMixin, BaseCommand):
 
         Must account for the old style of export as well, with just version.json
         """
-        version_path = self.source / "version.json"
-        metadata_path = self.source / "metadata.json"
+        version_path: Path = self.source / "version.json"
+        metadata_path: Path = self.source / "metadata.json"
         if not version_path.exists() and not metadata_path.exists():
             self.stdout.write(
                 self.style.NOTICE("No version.json or metadata.json file located"),
@@ -221,7 +226,7 @@ class Command(CryptMixin, BaseCommand):
                 )
                 raise e
 
-    def handle(self, *args, **options):
+    def handle(self, *args, **options) -> None:
         logging.getLogger().handlers[0].level = logging.ERROR
 
         self.source = Path(options["source"]).resolve()
@@ -233,14 +238,19 @@ class Command(CryptMixin, BaseCommand):
         self.manifest_paths = []
         self.manifest = []
 
+        # Create a temporary directory for extracting a zip file into it, even if supplied source is no zip file to keep code cleaner.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            if is_zipfile(self.source):
+                with ZipFile(self.source) as zf:
+                    zf.extractall(tmp_dir)
+                self.source = Path(tmp_dir)
+            self._run_import()
+
+    def _run_import(self):
         self.pre_check()
-
         self.load_metadata()
-
         self.load_manifest_files()
-
         self.check_manifest_validity()
-
         self.decrypt_secret_fields()
 
         # see /src/documents/signals/handlers.py
@@ -249,16 +259,19 @@ class Command(CryptMixin, BaseCommand):
                 post_save,
                 receiver=update_filename_and_move_files,
                 sender=Document,
+                weak=False,
             ),
             disable_signal(
                 m2m_changed,
                 receiver=update_filename_and_move_files,
                 sender=Document.tags.through,
+                weak=False,
             ),
             disable_signal(
                 post_save,
                 receiver=update_filename_and_move_files,
                 sender=CustomFieldInstance,
+                weak=False,
             ),
             disable_signal(
                 post_save,
@@ -290,13 +303,13 @@ class Command(CryptMixin, BaseCommand):
             no_progress_bar=self.no_progress_bar,
         )
 
-    def check_manifest_validity(self):
+    def check_manifest_validity(self) -> None:
         """
         Attempts to verify the manifest is valid.  Namely checking the files
         referred to exist and the files can be read from
         """
 
-        def check_document_validity(document_record: dict):
+        def check_document_validity(document_record: dict) -> None:
             if EXPORTER_FILE_NAME not in document_record:
                 raise CommandError(
                     "The manifest file contains a record which does not "
@@ -341,7 +354,7 @@ class Command(CryptMixin, BaseCommand):
             if not self.data_only and record["model"] == "documents.document":
                 check_document_validity(record)
 
-    def _import_files_from_manifest(self):
+    def _import_files_from_manifest(self) -> None:
         settings.ORIGINALS_DIR.mkdir(parents=True, exist_ok=True)
         settings.THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
         settings.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -356,24 +369,24 @@ class Command(CryptMixin, BaseCommand):
             document = Document.objects.get(pk=record["pk"])
 
             doc_file = record[EXPORTER_FILE_NAME]
-            document_path = os.path.join(self.source, doc_file)
+            document_path = self.source / doc_file
 
             if EXPORTER_THUMBNAIL_NAME in record:
                 thumb_file = record[EXPORTER_THUMBNAIL_NAME]
-                thumbnail_path = Path(os.path.join(self.source, thumb_file)).resolve()
+                thumbnail_path = (self.source / thumb_file).resolve()
             else:
                 thumbnail_path = None
 
             if EXPORTER_ARCHIVE_NAME in record:
                 archive_file = record[EXPORTER_ARCHIVE_NAME]
-                archive_path = os.path.join(self.source, archive_file)
+                archive_path = self.source / archive_file
             else:
                 archive_path = None
 
             document.storage_type = Document.STORAGE_TYPE_UNENCRYPTED
 
             with FileLock(settings.MEDIA_LOCK):
-                if os.path.isfile(document.source_path):
+                if Path(document.source_path).is_file():
                     raise FileExistsError(document.source_path)
 
                 create_source_path_directory(document.source_path)
@@ -418,8 +431,8 @@ class Command(CryptMixin, BaseCommand):
             had_at_least_one_record = False
 
             for crypt_config in self.CRYPT_FIELDS:
-                importer_model = crypt_config["model_name"]
-                crypt_fields = crypt_config["fields"]
+                importer_model: str = crypt_config["model_name"]
+                crypt_fields: str = crypt_config["fields"]
                 for record in filter(
                     lambda x: x["model"] == importer_model,
                     self.manifest,

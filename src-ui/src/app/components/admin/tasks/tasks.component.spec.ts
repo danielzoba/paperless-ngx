@@ -16,9 +16,11 @@ import {
   NgbNavItem,
 } from '@ng-bootstrap/ng-bootstrap'
 import { allIcons, NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
+import { throwError } from 'rxjs'
 import { routes } from 'src/app/app-routing.module'
 import {
   PaperlessTask,
+  PaperlessTaskName,
   PaperlessTaskStatus,
   PaperlessTaskType,
 } from 'src/app/data/paperless-task'
@@ -27,6 +29,7 @@ import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { PermissionsService } from 'src/app/services/permissions.service'
 import { TasksService } from 'src/app/services/tasks.service'
+import { ToastService } from 'src/app/services/toast.service'
 import { environment } from 'src/environments/environment'
 import { ConfirmDialogComponent } from '../../common/confirm-dialog/confirm-dialog.component'
 import { PageHeaderComponent } from '../../common/page-header/page-header.component'
@@ -39,7 +42,8 @@ const tasks: PaperlessTask[] = [
     task_file_name: 'test.pdf',
     date_created: new Date('2023-03-01T10:26:03.093116Z'),
     date_done: new Date('2023-03-01T10:26:07.223048Z'),
-    type: PaperlessTaskType.File,
+    type: PaperlessTaskType.Auto,
+    task_name: PaperlessTaskName.ConsumeFile,
     status: PaperlessTaskStatus.Failed,
     result: 'test.pd: Not consuming test.pdf: It is a duplicate of test (#100)',
     acknowledged: false,
@@ -51,7 +55,8 @@ const tasks: PaperlessTask[] = [
     task_file_name: '191092.pdf',
     date_created: new Date('2023-03-01T09:26:03.093116Z'),
     date_done: new Date('2023-03-01T09:26:07.223048Z'),
-    type: PaperlessTaskType.File,
+    type: PaperlessTaskType.Auto,
+    task_name: PaperlessTaskName.ConsumeFile,
     status: PaperlessTaskStatus.Failed,
     result:
       '191092.pd: Not consuming 191092.pdf: It is a duplicate of 191092 (#311)',
@@ -64,7 +69,8 @@ const tasks: PaperlessTask[] = [
     task_file_name: 'Scan Jun 6, 2023 at 3.19 PM.pdf',
     date_created: new Date('2023-06-06T15:22:05.722323-07:00'),
     date_done: new Date('2023-06-06T15:22:14.564305-07:00'),
-    type: PaperlessTaskType.File,
+    type: PaperlessTaskType.Auto,
+    task_name: PaperlessTaskName.ConsumeFile,
     status: PaperlessTaskStatus.Pending,
     result: null,
     acknowledged: false,
@@ -76,7 +82,8 @@ const tasks: PaperlessTask[] = [
     task_file_name: 'paperless-mail-l4dkg8ir',
     date_created: new Date('2023-06-04T11:24:32.898089-07:00'),
     date_done: new Date('2023-06-04T11:24:44.678605-07:00'),
-    type: PaperlessTaskType.File,
+    type: PaperlessTaskType.Auto,
+    task_name: PaperlessTaskName.ConsumeFile,
     status: PaperlessTaskStatus.Complete,
     result: 'Success. New document id 422 created',
     acknowledged: false,
@@ -88,7 +95,8 @@ const tasks: PaperlessTask[] = [
     task_file_name: 'onlinePaymentSummary.pdf',
     date_created: new Date('2023-06-01T13:49:51.631305-07:00'),
     date_done: new Date('2023-06-01T13:49:54.190220-07:00'),
-    type: PaperlessTaskType.File,
+    type: PaperlessTaskType.Auto,
+    task_name: PaperlessTaskName.ConsumeFile,
     status: PaperlessTaskStatus.Complete,
     result: 'Success. New document id 421 created',
     acknowledged: false,
@@ -100,7 +108,8 @@ const tasks: PaperlessTask[] = [
     task_file_name: 'paperless-mail-_rrpmqk6',
     date_created: new Date('2023-06-07T02:54:35.694916Z'),
     date_done: null,
-    type: PaperlessTaskType.File,
+    type: PaperlessTaskType.Auto,
+    task_name: PaperlessTaskName.ConsumeFile,
     status: PaperlessTaskStatus.Started,
     result: null,
     acknowledged: false,
@@ -116,6 +125,7 @@ describe('TasksComponent', () => {
   let router: Router
   let httpTestingController: HttpTestingController
   let reloadSpy
+  let toastService: ToastService
 
   beforeEach(async () => {
     TestBed.configureTestingModule({
@@ -150,12 +160,15 @@ describe('TasksComponent', () => {
     httpTestingController = TestBed.inject(HttpTestingController)
     modalService = TestBed.inject(NgbModal)
     router = TestBed.inject(Router)
+    toastService = TestBed.inject(ToastService)
     fixture = TestBed.createComponent(TasksComponent)
     component = fixture.componentInstance
     jest.useFakeTimers()
     fixture.detectChanges()
     httpTestingController
-      .expectOne(`${environment.apiBaseUrl}tasks/`)
+      .expectOne(
+        `${environment.apiBaseUrl}tasks/?task_name=consume_file&acknowledged=false`
+      )
       .flush(tasks)
   })
 
@@ -238,6 +251,42 @@ describe('TasksComponent', () => {
     expect(modal).not.toBeUndefined()
     modal.componentInstance.confirmClicked.emit()
     expect(dismissSpy).toHaveBeenCalledWith(selected)
+  })
+
+  it('should show an error and re-enable modal buttons when dismissing multiple tasks fails', () => {
+    component.selectedTasks = new Set([tasks[0].id, tasks[1].id])
+    const error = new Error('dismiss failed')
+    const toastSpy = jest.spyOn(toastService, 'showError')
+    const dismissSpy = jest
+      .spyOn(tasksService, 'dismissTasks')
+      .mockReturnValue(throwError(() => error))
+
+    let modal: NgbModalRef
+    modalService.activeInstances.subscribe((m) => (modal = m[m.length - 1]))
+
+    component.dismissTasks()
+    expect(modal).not.toBeUndefined()
+
+    modal.componentInstance.confirmClicked.emit()
+
+    expect(dismissSpy).toHaveBeenCalledWith(new Set([tasks[0].id, tasks[1].id]))
+    expect(toastSpy).toHaveBeenCalledWith('Error dismissing tasks', error)
+    expect(modal.componentInstance.buttonsEnabled).toBe(true)
+    expect(component.selectedTasks.size).toBe(0)
+  })
+
+  it('should show an error when dismissing a single task fails', () => {
+    const error = new Error('dismiss failed')
+    const toastSpy = jest.spyOn(toastService, 'showError')
+    const dismissSpy = jest
+      .spyOn(tasksService, 'dismissTasks')
+      .mockReturnValue(throwError(() => error))
+
+    component.dismissTask(tasks[0])
+
+    expect(dismissSpy).toHaveBeenCalledWith(new Set([tasks[0].id]))
+    expect(toastSpy).toHaveBeenCalledWith('Error dismissing task', error)
+    expect(component.selectedTasks.size).toBe(0)
   })
 
   it('should support dismiss all tasks', () => {

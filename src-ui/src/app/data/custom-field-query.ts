@@ -36,6 +36,7 @@ export const CUSTOM_FIELD_QUERY_OPERATOR_LABELS = {
 
 export enum CustomFieldQueryOperatorGroups {
   Basic = 'basic',
+  Exact = 'exact',
   String = 'string',
   Arithmetic = 'arithmetic',
   Containment = 'containment',
@@ -48,8 +49,8 @@ export const CUSTOM_FIELD_QUERY_OPERATORS_BY_GROUP = {
   [CustomFieldQueryOperatorGroups.Basic]: [
     CustomFieldQueryOperator.Exists,
     CustomFieldQueryOperator.IsNull,
-    CustomFieldQueryOperator.Exact,
   ],
+  [CustomFieldQueryOperatorGroups.Exact]: [CustomFieldQueryOperator.Exact],
   [CustomFieldQueryOperatorGroups.String]: [CustomFieldQueryOperator.IContains],
   [CustomFieldQueryOperatorGroups.Arithmetic]: [
     CustomFieldQueryOperator.GreaterThan,
@@ -71,27 +72,36 @@ export const CUSTOM_FIELD_QUERY_OPERATORS_BY_GROUP = {
 export const CUSTOM_FIELD_QUERY_OPERATOR_GROUPS_BY_TYPE = {
   [CustomFieldDataType.String]: [
     CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
     CustomFieldQueryOperatorGroups.String,
   ],
   [CustomFieldDataType.Url]: [
     CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
     CustomFieldQueryOperatorGroups.String,
   ],
   [CustomFieldDataType.Date]: [
     CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
     CustomFieldQueryOperatorGroups.Date,
   ],
-  [CustomFieldDataType.Boolean]: [CustomFieldQueryOperatorGroups.Basic],
+  [CustomFieldDataType.Boolean]: [
+    CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
+  ],
   [CustomFieldDataType.Integer]: [
     CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
     CustomFieldQueryOperatorGroups.Arithmetic,
   ],
   [CustomFieldDataType.Float]: [
     CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
     CustomFieldQueryOperatorGroups.Arithmetic,
   ],
   [CustomFieldDataType.Monetary]: [
     CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
     CustomFieldQueryOperatorGroups.String,
     CustomFieldQueryOperatorGroups.Arithmetic,
   ],
@@ -101,7 +111,12 @@ export const CUSTOM_FIELD_QUERY_OPERATOR_GROUPS_BY_TYPE = {
   ],
   [CustomFieldDataType.Select]: [
     CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.Exact,
     CustomFieldQueryOperatorGroups.Subset,
+  ],
+  [CustomFieldDataType.LongText]: [
+    CustomFieldQueryOperatorGroups.Basic,
+    CustomFieldQueryOperatorGroups.String,
   ],
 }
 

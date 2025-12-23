@@ -1,7 +1,7 @@
 import { HttpClient } from '@angular/common/http'
-import { Component, Input, OnDestroy, ViewChild } from '@angular/core'
+import { Component, inject, Input, OnDestroy, ViewChild } from '@angular/core'
 import { NgbPopover, NgbPopoverModule } from '@ng-bootstrap/ng-bootstrap'
-import { PdfViewerModule } from 'ng2-pdf-viewer'
+import { PdfViewerComponent, PdfViewerModule } from 'ng2-pdf-viewer'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { first, Subject, takeUntil } from 'rxjs'
 import { Document } from 'src/app/data/document'
@@ -24,6 +24,10 @@ import { SettingsService } from 'src/app/services/settings.service'
   ],
 })
 export class PreviewPopupComponent implements OnDestroy {
+  private settingsService = inject(SettingsService)
+  private documentService = inject(DocumentService)
+  private http = inject(HttpClient)
+
   private _document: Document
   @Input()
   set document(document: Document) {
@@ -57,6 +61,8 @@ export class PreviewPopupComponent implements OnDestroy {
 
   @ViewChild('popover') popover: NgbPopover
 
+  @ViewChild('pdfViewer') pdfViewer: PdfViewerComponent
+
   mouseOnPreview: boolean = false
 
   popoverClass: string = 'shadow popover-preview'
@@ -65,7 +71,7 @@ export class PreviewPopupComponent implements OnDestroy {
     return (this.isPdf && this.useNativePdfViewer) || !this.isPdf
   }
 
-  get previewURL() {
+  get previewUrl() {
     return this.documentService.getPreviewUrl(this.document.id)
   }
 
@@ -80,12 +86,6 @@ export class PreviewPopupComponent implements OnDestroy {
     )
   }
 
-  constructor(
-    private settingsService: SettingsService,
-    private documentService: DocumentService,
-    private http: HttpClient
-  ) {}
-
   ngOnDestroy(): void {
     this.unsubscribeNotifier.next(this)
   }
@@ -93,7 +93,7 @@ export class PreviewPopupComponent implements OnDestroy {
   init() {
     if (this.document.mime_type?.includes('text')) {
       this.http
-        .get(this.previewURL, { responseType: 'text' })
+        .get(this.previewUrl, { responseType: 'text' })
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
         .subscribe({
           next: (res) => {
@@ -114,8 +114,16 @@ export class PreviewPopupComponent implements OnDestroy {
     }
   }
 
-  get previewUrl() {
-    return this.documentService.getPreviewUrl(this.document.id)
+  onPageRendered() {
+    // Only triggered by the pngx pdf viewer
+    if (this.documentService.searchQuery) {
+      this.pdfViewer.eventBus.dispatch('find', {
+        query: this.documentService.searchQuery,
+        caseSensitive: false,
+        highlightAll: true,
+        phraseSearch: true,
+      })
+    }
   }
 
   mouseEnterPreview() {

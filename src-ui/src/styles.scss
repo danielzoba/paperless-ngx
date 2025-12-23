@@ -9,7 +9,7 @@ $form-file-button-hover-bg: var(--pngx-bg-alt);
 
 @import "node_modules/bootstrap/dist/css/bootstrap.css";
 @include meta.load-css("theme");
-@import "~@ng-select/ng-select/themes/default.theme.css";
+@import "@ng-select/ng-select/themes/default.theme.css";
 @include meta.load-css("print");
 
 // re-created bootstrap styles
@@ -24,6 +24,9 @@ $form-file-button-hover-bg: var(--pngx-bg-alt);
 }
 .mb-n2 {
   margin-bottom: -0.5rem;
+}
+.ms-n1 {
+  margin-left: -0.25rem;
 }
 .ms-n2 {
   margin-left: -0.5rem;
@@ -567,6 +570,10 @@ table.table {
   color: var(--bs-body-color);
 }
 
+.toast {
+  --bs-toast-max-width: var(--pngx-toast-max-width);
+}
+
 .alert-primary {
   --bs-alert-color: var(--bs-primary);
   --bs-alert-bg: var(--pngx-primary-faded);
@@ -760,6 +767,8 @@ canvas.hiddenCanvasElement {
 }
 
 .document-card {
+  overflow: hidden;
+
   .card-footer i-bs svg {
     vertical-align: middle;
   }

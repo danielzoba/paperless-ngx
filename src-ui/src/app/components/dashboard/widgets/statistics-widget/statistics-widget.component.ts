@@ -1,15 +1,18 @@
 import { DecimalPipe } from '@angular/common'
 import { HttpClient } from '@angular/common/http'
-import { Component, OnDestroy, OnInit } from '@angular/core'
+import { Component, inject, OnDestroy, OnInit } from '@angular/core'
 import { RouterModule } from '@angular/router'
 import { NgbPopoverModule } from '@ng-bootstrap/ng-bootstrap'
 import * as mimeTypeNames from 'mime-names'
 import { first, Subject, Subscription, takeUntil } from 'rxjs'
 import { ComponentWithPermissions } from 'src/app/components/with-permissions/with-permissions.component'
-import { FILTER_HAS_TAGS_ANY } from 'src/app/data/filter-rule-type'
+import {
+  FILTER_HAS_TAGS_ANY,
+  FILTER_MIME_TYPE,
+} from 'src/app/data/filter-rule-type'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
-import { ConsumerStatusService } from 'src/app/services/consumer-status.service'
 import { DocumentListViewService } from 'src/app/services/document-list-view.service'
+import { WebsocketStatusService } from 'src/app/services/websocket-status.service'
 import { environment } from 'src/environments/environment'
 import { WidgetFrameComponent } from '../widget-frame/widget-frame.component'
 
@@ -29,6 +32,7 @@ export interface Statistics {
 interface DocumentFileType {
   mime_type: string
   mime_type_count: number
+  is_other?: boolean
 }
 
 @Component({
@@ -47,15 +51,11 @@ export class StatisticsWidgetComponent
   extends ComponentWithPermissions
   implements OnInit, OnDestroy
 {
-  loading: boolean = false
+  private http = inject(HttpClient)
+  private websocketConnectionService = inject(WebsocketStatusService)
+  private documentListViewService = inject(DocumentListViewService)
 
-  constructor(
-    private http: HttpClient,
-    private consumerStatusService: ConsumerStatusService,
-    private documentListViewService: DocumentListViewService
-  ) {
-    super()
-  }
+  loading: boolean = false
 
   statistics: Statistics = {}
 
@@ -77,6 +77,7 @@ export class StatisticsWidgetComponent
             statistics.document_file_type_counts.slice(0, fileTypeMax)
           statistics.document_file_type_counts.push({
             mime_type: $localize`Other`,
+            is_other: true,
             mime_type_count: others.reduce(
               (currentValue, documentFileType) =>
                 documentFileType.mime_type_count + currentValue,
@@ -109,7 +110,7 @@ export class StatisticsWidgetComponent
 
   ngOnInit(): void {
     this.reload()
-    this.subscription = this.consumerStatusService
+    this.subscription = this.websocketConnectionService
       .onDocumentConsumptionFinished()
       .subscribe(() => {
         this.reload()
@@ -129,6 +130,16 @@ export class StatisticsWidgetComponent
         value: this.statistics.inbox_tags
           .map((tagID) => tagID.toString())
           .join(','),
+      },
+    ])
+  }
+
+  filterByFileType(filetype: DocumentFileType) {
+    if (filetype.is_other) return
+    this.documentListViewService.quickFilter([
+      {
+        rule_type: FILTER_MIME_TYPE,
+        value: filetype.mime_type,
       },
     ])
   }

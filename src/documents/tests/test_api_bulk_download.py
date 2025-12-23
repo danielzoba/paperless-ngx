@@ -1,7 +1,6 @@
 import datetime
 import io
 import json
-import os
 import shutil
 import zipfile
 
@@ -15,16 +14,17 @@ from documents.models import Correspondent
 from documents.models import Document
 from documents.models import DocumentType
 from documents.tests.utils import DirectoriesMixin
+from documents.tests.utils import SampleDirMixin
 
 
-class TestBulkDownload(DirectoriesMixin, APITestCase):
+class TestBulkDownload(DirectoriesMixin, SampleDirMixin, APITestCase):
     ENDPOINT = "/api/documents/bulk_download/"
 
     def setUp(self):
         super().setUp()
 
-        user = User.objects.create_superuser(username="temp_admin")
-        self.client.force_authenticate(user=user)
+        self.user = User.objects.create_superuser(username="temp_admin")
+        self.client.force_authenticate(user=self.user)
 
         self.doc1 = Document.objects.create(title="unrelated", checksum="A")
         self.doc2 = Document.objects.create(
@@ -51,22 +51,10 @@ class TestBulkDownload(DirectoriesMixin, APITestCase):
             archive_checksum="D",
         )
 
-        shutil.copy(
-            os.path.join(os.path.dirname(__file__), "samples", "simple.pdf"),
-            self.doc2.source_path,
-        )
-        shutil.copy(
-            os.path.join(os.path.dirname(__file__), "samples", "simple.png"),
-            self.doc2b.source_path,
-        )
-        shutil.copy(
-            os.path.join(os.path.dirname(__file__), "samples", "simple.jpg"),
-            self.doc3.source_path,
-        )
-        shutil.copy(
-            os.path.join(os.path.dirname(__file__), "samples", "test_with_bom.pdf"),
-            self.doc3.archive_path,
-        )
+        shutil.copy(self.SAMPLE_DIR / "simple.pdf", self.doc2.source_path)
+        shutil.copy(self.SAMPLE_DIR / "simple.png", self.doc2b.source_path)
+        shutil.copy(self.SAMPLE_DIR / "simple.jpg", self.doc3.source_path)
+        shutil.copy(self.SAMPLE_DIR / "test_with_bom.pdf", self.doc3.archive_path)
 
     def test_download_originals(self):
         response = self.client.post(
@@ -333,3 +321,19 @@ class TestBulkDownload(DirectoriesMixin, APITestCase):
                     f.read(),
                     zipf.read("originals/statement/Title 2 - Doc 3.jpg"),
                 )
+
+    def test_download_insufficient_permissions(self):
+        user = User.objects.create_user(username="temp_user")
+        self.client.force_authenticate(user=user)
+
+        self.doc2.owner = self.user
+        self.doc2.save()
+
+        response = self.client.post(
+            self.ENDPOINT,
+            json.dumps({"documents": [self.doc2.id, self.doc3.id]}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.content, b"Insufficient permissions")

@@ -1,6 +1,9 @@
+import base64
 import json
+from unittest import mock
 
 from allauth.mfa.models import Authenticator
+from allauth.mfa.totp.internal import auth as totp_auth
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
@@ -85,14 +88,14 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         )
 
     def test_api_version_no_auth(self):
-        response = self.client.get("/api/")
+        response = self.client.get("/api/documents/")
         self.assertNotIn("X-Api-Version", response)
         self.assertNotIn("X-Version", response)
 
     def test_api_version_with_auth(self):
         user = User.objects.create_superuser(username="test")
         self.client.force_authenticate(user)
-        response = self.client.get("/api/")
+        response = self.client.get("/api/documents/")
         self.assertIn("X-Api-Version", response)
         self.assertIn("X-Version", response)
 
@@ -392,6 +395,52 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertTrue(checker.has_perm("view_document", doc))
         self.assertIn("view_document", get_perms(group1, doc))
 
+    def test_patch_doesnt_remove_permissions(self):
+        """
+        GIVEN:
+            - existing document with permissions set
+        WHEN:
+            - PATCH API request to update doc that is not json
+        THEN:
+            - Object permissions are not removed
+        """
+        doc = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="this is a document",
+        )
+        user1 = User.objects.create_superuser(username="user1")
+        user2 = User.objects.create(username="user2")
+        group1 = Group.objects.create(name="group1")
+        doc.owner = user1
+        doc.save()
+
+        assign_perm("view_document", user2, doc)
+        assign_perm("change_document", user2, doc)
+        assign_perm("view_document", group1, doc)
+        assign_perm("change_document", group1, doc)
+
+        self.client.force_authenticate(user1)
+
+        response = self.client.patch(
+            f"/api/documents/{doc.id}/",
+            {
+                "archive_serial_number": "123",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        doc = Document.objects.get(pk=doc.id)
+
+        self.assertEqual(doc.owner, user1)
+        from guardian.core import ObjectPermissionChecker
+
+        checker = ObjectPermissionChecker(user2)
+        self.assertTrue(checker.has_perm("view_document", doc))
+        self.assertIn("view_document", get_perms(group1, doc))
+        self.assertTrue(checker.has_perm("change_document", doc))
+        self.assertIn("change_document", get_perms(group1, doc))
+
     def test_dynamic_permissions_fields(self):
         user1 = User.objects.create_user(username="user1")
         user1.user_permissions.add(*Permission.objects.filter(codename="view_document"))
@@ -425,7 +474,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.client.force_authenticate(user1)
 
         response = self.client.get(
-            "/api/documents/",
+            "/api/documents/?ordering=-id",
             format="json",
         )
 
@@ -461,6 +510,95 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertIn("permissions", results[0])
         self.assertNotIn("user_can_change", results[0])
         self.assertNotIn("is_shared_by_requester", results[0])
+
+    @mock.patch("allauth.mfa.adapter.DefaultMFAAdapter.is_mfa_enabled")
+    def test_basic_auth_mfa_enabled(self, mock_is_mfa_enabled):
+        """
+        GIVEN:
+            - User with MFA enabled
+        WHEN:
+            - API request is made with basic auth
+        THEN:
+            - MFA required error is returned
+        """
+        user1 = User.objects.create_user(username="user1")
+        user1.set_password("password")
+        user1.save()
+
+        mock_is_mfa_enabled.return_value = True
+
+        response = self.client.get(
+            "/api/documents/",
+            HTTP_AUTHORIZATION="Basic " + base64.b64encode(b"user1:password").decode(),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["detail"], "MFA required")
+
+    @mock.patch("allauth.mfa.totp.internal.auth.TOTP.validate_code")
+    def test_get_token_mfa_enabled(self, mock_validate_code):
+        """
+        GIVEN:
+            - User with MFA enabled
+        WHEN:
+            - API request is made to obtain an auth token
+        THEN:
+            - MFA code is required
+        """
+        user1 = User.objects.create_user(username="user1")
+        user1.set_password("password")
+        user1.save()
+
+        response = self.client.post(
+            "/api/token/",
+            data={
+                "username": "user1",
+                "password": "password",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        secret = totp_auth.generate_totp_secret()
+        totp_auth.TOTP.activate(
+            user1,
+            secret,
+        )
+
+        # no code
+        response = self.client.post(
+            "/api/token/",
+            data={
+                "username": "user1",
+                "password": "password",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["non_field_errors"][0], "MFA code is required")
+
+        # invalid code
+        mock_validate_code.return_value = False
+        response = self.client.post(
+            "/api/token/",
+            data={
+                "username": "user1",
+                "password": "password",
+                "code": "123456",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["non_field_errors"][0], "Invalid MFA code")
+
+        # valid code
+        mock_validate_code.return_value = True
+        response = self.client.post(
+            "/api/token/",
+            data={
+                "username": "user1",
+                "password": "password",
+                "code": "123456",
+            },
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
 
 class TestApiUser(DirectoriesMixin, APITestCase):
@@ -510,7 +648,7 @@ class TestApiUser(DirectoriesMixin, APITestCase):
 
         user1 = {
             "username": "testuser",
-            "password": "test",
+            "password": "areallysupersecretpassword235",
             "first_name": "Test",
             "last_name": "User",
         }
@@ -592,7 +730,7 @@ class TestApiUser(DirectoriesMixin, APITestCase):
             f"{self.ENDPOINT}{user1.pk}/",
             data={
                 "first_name": "Updated Name 2",
-                "password": "123xyz",
+                "password": "newreallystrongpassword456",
             },
         )
 
@@ -654,6 +792,80 @@ class TestApiUser(DirectoriesMixin, APITestCase):
             f"{self.ENDPOINT}{user1.pk}/deactivate_totp/",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_only_superusers_can_create_or_alter_superuser_status(self):
+        """
+        GIVEN:
+            - Existing user account
+        WHEN:
+            - API request is made to add a user account with superuser status
+            - API request is made to change superuser status
+        THEN:
+            - Only superusers can change superuser status
+        """
+
+        user1 = User.objects.create_user(username="user1")
+        user1.user_permissions.add(*Permission.objects.all())
+        user2 = User.objects.create_superuser(username="user2")
+
+        self.client.force_authenticate(user1)
+
+        response = self.client.patch(
+            f"{self.ENDPOINT}{user1.pk}/",
+            json.dumps(
+                {
+                    "is_superuser": True,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        response = self.client.post(
+            f"{self.ENDPOINT}",
+            json.dumps(
+                {
+                    "username": "user3",
+                    "is_superuser": True,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user2)
+
+        response = self.client.patch(
+            f"{self.ENDPOINT}{user1.pk}/",
+            json.dumps(
+                {
+                    "is_superuser": True,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        returned_user1 = User.objects.get(pk=user1.pk)
+        self.assertEqual(returned_user1.is_superuser, True)
+
+        response = self.client.patch(
+            f"{self.ENDPOINT}{user1.pk}/",
+            json.dumps(
+                {
+                    "is_superuser": False,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        returned_user1 = User.objects.get(pk=user1.pk)
+        self.assertEqual(returned_user1.is_superuser, False)
 
 
 class TestApiGroup(DirectoriesMixin, APITestCase):
@@ -1066,3 +1278,34 @@ class TestBulkEditObjectPermissions(APITestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TestFullPermissionsFlag(APITestCase):
+    def setUp(self):
+        super().setUp()
+
+        self.admin = User.objects.create_superuser(username="admin")
+
+    def test_full_perms_flag(self):
+        """
+        GIVEN:
+            - API request to list documents
+        WHEN:
+            - full_perms flag is set to true, 1, false, or a random value
+        THEN:
+            - Permissions field is included or excluded accordingly
+        """
+        self.client.force_authenticate(self.admin)
+        Document.objects.create(title="Doc", checksum="xyz", owner=self.admin)
+
+        resp = self.client.get("/api/documents/?full_perms=true")
+        self.assertIn("permissions", resp.data["results"][0])
+
+        resp = self.client.get("/api/documents/?full_perms=1")
+        self.assertIn("permissions", resp.data["results"][0])
+
+        resp = self.client.get("/api/documents/?full_perms=false")
+        self.assertNotIn("permissions", resp.data["results"][0])
+
+        resp = self.client.get("/api/documents/?full_perms=garbage")
+        self.assertNotIn("permissions", resp.data["results"][0])

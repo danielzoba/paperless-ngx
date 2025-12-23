@@ -1,6 +1,6 @@
-import { Component, OnInit } from '@angular/core'
+import { Component, OnInit, inject } from '@angular/core'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import { NgbDropdownModule, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { delay, takeUntil, tap } from 'rxjs'
 import { Workflow } from 'src/app/data/workflow'
@@ -26,6 +26,7 @@ import { LoadingComponentWithPermissions } from '../../loading-component/loading
     IfPermissionsDirective,
     FormsModule,
     ReactiveFormsModule,
+    NgbDropdownModule,
     NgxBootstrapIconsModule,
   ],
 })
@@ -33,16 +34,12 @@ export class WorkflowsComponent
   extends LoadingComponentWithPermissions
   implements OnInit
 {
-  public workflows: Workflow[] = []
+  private workflowService = inject(WorkflowService)
+  permissionsService = inject(PermissionsService)
+  private modalService = inject(NgbModal)
+  private toastService = inject(ToastService)
 
-  constructor(
-    private workflowService: WorkflowService,
-    public permissionsService: PermissionsService,
-    private modalService: NgbModal,
-    private toastService: ToastService
-  ) {
-    super()
-  }
+  public workflows: Workflow[] = []
 
   ngOnInit() {
     this.reload()
@@ -109,6 +106,12 @@ export class WorkflowsComponent
     clone.actions = [
       ...workflow.actions.map((a) => {
         a.id = null
+        if (a.webhook) {
+          a.webhook.id = null
+        }
+        if (a.email) {
+          a.email.id = null
+        }
         return a
       }),
     ]
@@ -135,30 +138,38 @@ export class WorkflowsComponent
       this.workflowService.delete(workflow).subscribe({
         next: () => {
           modal.close()
-          this.toastService.showInfo($localize`Deleted workflow`)
+          this.toastService.showInfo(
+            $localize`Deleted workflow "${workflow.name}".`
+          )
           this.workflowService.clearCache()
           this.reload()
         },
         error: (e) => {
-          this.toastService.showError($localize`Error deleting workflow.`, e)
+          this.toastService.showError(
+            $localize`Error deleting workflow "${workflow.name}".`,
+            e
+          )
         },
       })
     })
   }
 
-  onWorkflowEnableToggled(workflow: Workflow) {
+  toggleWorkflowEnabled(workflow: Workflow) {
     this.workflowService.patch(workflow).subscribe({
       next: () => {
         this.toastService.showInfo(
           workflow.enabled
-            ? $localize`Enabled workflow`
-            : $localize`Disabled workflow`
+            ? $localize`Enabled workflow "${workflow.name}"`
+            : $localize`Disabled workflow "${workflow.name}"`
         )
         this.workflowService.clearCache()
         this.reload()
       },
       error: (e) => {
-        this.toastService.showError($localize`Error toggling workflow.`, e)
+        this.toastService.showError(
+          $localize`Error toggling workflow "${workflow.name}".`,
+          e
+        )
       },
     })
   }
