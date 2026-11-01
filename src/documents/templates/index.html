@@ -12,7 +12,7 @@
 	<meta name="robots" content="noindex,nofollow">
 	<meta name="author" content="The Paperless-ngx Team">
 	<link rel="icon" type="image/x-icon" href="favicon.ico">
-	<link rel="manifest" href="{% static webmanifest %}">
+	<link rel="manifest" href="{% static webmanifest %}" crossorigin="use-credentials">
 	<link rel="stylesheet" href="{% static styles_css %}">
 	<link rel="apple-touch-icon" href="{% static apple_touch_icon %}">
 </head>
@@ -70,8 +70,7 @@
 			]
 		</script>
 	</pngx-root>
-	<script src="{% static runtime_js %}" defer></script>
-	<script src="{% static polyfills_js %}" defer></script>
-	<script src="{% static main_js %}" defer></script>
+	<script src="{% static polyfills_js %}" type="module"></script>
+	<script src="{% static main_js %}" type="module"></script>
 </body>
 </html>

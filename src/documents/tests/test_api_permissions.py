@@ -5,9 +5,7 @@ from unittest import mock
 from allauth.mfa.models import Authenticator
 from allauth.mfa.totp.internal import auth as totp_auth
 from django.contrib.auth.models import Group
-from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
-from guardian.shortcuts import assign_perm
 from guardian.shortcuts import get_perms
 from guardian.shortcuts import get_users_with_perms
 from rest_framework import status
@@ -19,11 +17,15 @@ from documents.models import DocumentType
 from documents.models import MatchingModel
 from documents.models import StoragePath
 from documents.models import Tag
-from documents.tests.utils import DirectoriesMixin
+from paperless_testing.dirs import DirectoriesMixin
+from paperless_testing.factories import UserFactory
+from paperless_testing.permissions import grant_all_global
+from paperless_testing.permissions import grant_global
+from paperless_testing.permissions import grant_object
 
 
 class TestApiAuth(DirectoriesMixin, APITestCase):
-    def test_auth_required(self):
+    def test_auth_required(self) -> None:
         d = Document.objects.create(title="Test")
 
         self.assertEqual(
@@ -87,20 +89,20 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             status.HTTP_401_UNAUTHORIZED,
         )
 
-    def test_api_version_no_auth(self):
+    def test_api_version_no_auth(self) -> None:
         response = self.client.get("/api/documents/")
         self.assertNotIn("X-Api-Version", response)
         self.assertNotIn("X-Version", response)
 
-    def test_api_version_with_auth(self):
-        user = User.objects.create_superuser(username="test")
+    def test_api_version_with_auth(self) -> None:
+        user = UserFactory(username="test", superuser=True)
         self.client.force_authenticate(user)
         response = self.client.get("/api/documents/")
         self.assertIn("X-Api-Version", response)
         self.assertIn("X-Version", response)
 
-    def test_api_insufficient_permissions(self):
-        user = User.objects.create_user(username="test")
+    def test_api_insufficient_permissions(self) -> None:
+        user = UserFactory(username="test")
         self.client.force_authenticate(user)
 
         Document.objects.create(title="Test")
@@ -131,10 +133,14 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             self.client.get("/api/saved_views/").status_code,
             status.HTTP_403_FORBIDDEN,
         )
+        self.assertEqual(
+            self.client.get("/api/search/autocomplete/?term=test").status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
 
-    def test_api_sufficient_permissions(self):
-        user = User.objects.create_user(username="test")
-        user.user_permissions.add(*Permission.objects.all())
+    def test_api_sufficient_permissions(self) -> None:
+        user = UserFactory(username="test")
+        grant_all_global(user)
         user.is_staff = True
         self.client.force_authenticate(user)
 
@@ -161,10 +167,10 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             status.HTTP_200_OK,
         )
 
-    def test_api_get_object_permissions(self):
-        user1 = User.objects.create_user(username="test1")
-        user2 = User.objects.create_user(username="test2")
-        user1.user_permissions.add(*Permission.objects.filter(codename="view_document"))
+    def test_api_get_object_permissions(self) -> None:
+        user1 = UserFactory(username="test1")
+        user2 = UserFactory(username="test2")
+        grant_global(user1, "view_document")
         self.client.force_authenticate(user1)
 
         self.assertEqual(
@@ -192,7 +198,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             status.HTTP_404_NOT_FOUND,
         )
 
-    def test_api_default_owner(self):
+    def test_api_default_owner(self) -> None:
         """
         GIVEN:
             - API request to create an object (Tag)
@@ -201,7 +207,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         THEN:
             - Object created with current user as owner
         """
-        user1 = User.objects.create_superuser(username="user1")
+        user1 = UserFactory(username="user1", superuser=True)
 
         self.client.force_authenticate(user1)
 
@@ -221,7 +227,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         tag1 = Tag.objects.filter(name="test1").first()
         self.assertEqual(tag1.owner, user1)
 
-    def test_api_set_no_owner(self):
+    def test_api_set_no_owner(self) -> None:
         """
         GIVEN:
             - API request to create an object (Tag)
@@ -230,7 +236,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         THEN:
             - Object created with no owner
         """
-        user1 = User.objects.create_superuser(username="user1")
+        user1 = UserFactory(username="user1", superuser=True)
 
         self.client.force_authenticate(user1)
 
@@ -251,7 +257,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         tag1 = Tag.objects.filter(name="test1").first()
         self.assertEqual(tag1.owner, None)
 
-    def test_api_set_owner_w_permissions(self):
+    def test_api_set_owner_w_permissions(self) -> None:
         """
         GIVEN:
             - API request to create an object (Tag) that supplies set_permissions object
@@ -261,7 +267,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         THEN:
             - Object permissions are set appropriately
         """
-        user1 = User.objects.create_superuser(username="user1")
+        user1 = UserFactory(username="user1", superuser=True)
         user2 = User.objects.create(username="user2")
         group1 = Group.objects.create(name="group1")
 
@@ -299,7 +305,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertEqual(checker.has_perm("view_tag", tag1), True)
         self.assertIn("view_tag", get_perms(group1, tag1))
 
-    def test_api_set_other_owner_w_permissions(self):
+    def test_api_set_other_owner_w_permissions(self) -> None:
         """
         GIVEN:
             - API request to create an object (Tag)
@@ -309,7 +315,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         THEN:
             - Object permissions are set appropriately
         """
-        user1 = User.objects.create_superuser(username="user1")
+        user1 = UserFactory(username="user1", superuser=True)
         user2 = User.objects.create(username="user2")
         group1 = Group.objects.create(name="group1")
 
@@ -344,7 +350,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertEqual(tag1.owner, user2)
         self.assertIn("view_tag", get_perms(group1, tag1))
 
-    def test_api_set_doc_permissions(self):
+    def test_api_set_doc_permissions(self) -> None:
         """
         GIVEN:
             - API request to update doc permissions and owner
@@ -359,7 +365,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             mime_type="application/pdf",
             content="this is a document",
         )
-        user1 = User.objects.create_superuser(username="user1")
+        user1 = UserFactory(username="user1", superuser=True)
         user2 = User.objects.create(username="user2")
         group1 = Group.objects.create(name="group1")
 
@@ -395,7 +401,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertTrue(checker.has_perm("view_document", doc))
         self.assertIn("view_document", get_perms(group1, doc))
 
-    def test_patch_doesnt_remove_permissions(self):
+    def test_patch_doesnt_remove_permissions(self) -> None:
         """
         GIVEN:
             - existing document with permissions set
@@ -409,16 +415,16 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             mime_type="application/pdf",
             content="this is a document",
         )
-        user1 = User.objects.create_superuser(username="user1")
+        user1 = UserFactory(username="user1", superuser=True)
         user2 = User.objects.create(username="user2")
         group1 = Group.objects.create(name="group1")
         doc.owner = user1
         doc.save()
 
-        assign_perm("view_document", user2, doc)
-        assign_perm("change_document", user2, doc)
-        assign_perm("view_document", group1, doc)
-        assign_perm("change_document", group1, doc)
+        grant_object(user2, doc, "view_document")
+        grant_object(user2, doc, "change_document")
+        grant_object(group1, doc, "view_document")
+        grant_object(group1, doc, "change_document")
 
         self.client.force_authenticate(user1)
 
@@ -441,10 +447,61 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertTrue(checker.has_perm("change_document", doc))
         self.assertIn("change_document", get_perms(group1, doc))
 
-    def test_dynamic_permissions_fields(self):
-        user1 = User.objects.create_user(username="user1")
-        user1.user_permissions.add(*Permission.objects.filter(codename="view_document"))
-        user2 = User.objects.create_user(username="user2")
+    def test_document_permissions_change_requires_owner(self) -> None:
+        owner = UserFactory(username="owner")
+        editor = UserFactory(username="editor")
+        grant_all_global(editor)
+
+        doc = Document.objects.create(
+            title="Ownered doc",
+            content="sensitive",
+            checksum="abc123",
+            mime_type="application/pdf",
+            owner=owner,
+        )
+
+        grant_object(editor, doc, "view_document")
+        grant_object(editor, doc, "change_document")
+
+        self.client.force_authenticate(editor)
+        response = self.client.patch(
+            f"/api/documents/{doc.pk}/",
+            json.dumps(
+                {
+                    "set_permissions": {
+                        "view": {
+                            "users": [editor.id],
+                            "groups": [],
+                        },
+                        "change": {
+                            "users": None,
+                            "groups": None,
+                        },
+                    },
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(editor)
+        response = self.client.patch(
+            f"/api/documents/{doc.pk}/",
+            json.dumps(
+                {
+                    "owner": editor.id,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_dynamic_permissions_fields(self) -> None:
+        user1 = UserFactory(username="user1")
+        grant_global(user1, "view_document")
+        user2 = UserFactory(username="user2")
 
         Document.objects.create(title="Test", content="content 1", checksum="1")
         doc2 = Document.objects.create(
@@ -466,10 +523,10 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
             owner=user1,
         )
 
-        assign_perm("view_document", user1, doc2)
-        assign_perm("view_document", user1, doc3)
-        assign_perm("change_document", user1, doc3)
-        assign_perm("view_document", user2, doc4)
+        grant_object(user1, doc2, "view_document")
+        grant_object(user1, doc3, "view_document")
+        grant_object(user1, doc3, "change_document")
+        grant_object(user2, doc4, "view_document")
 
         self.client.force_authenticate(user1)
 
@@ -511,8 +568,32 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertNotIn("user_can_change", results[0])
         self.assertNotIn("is_shared_by_requester", results[0])
 
+    def test_superuser_user_can_change_without_explicit_grant(self) -> None:
+        """
+        A superuser has implicit change access to every document, even one
+        owned by someone else with no explicit guardian grant -- mirrors
+        guardian's own ObjectPermissionChecker.has_perm() superuser shortcut.
+        """
+        superuser = UserFactory(username="admin", superuser=True)
+        other_user = UserFactory(username="user2")
+        Document.objects.create(
+            title="Test",
+            content="content",
+            checksum="1",
+            owner=other_user,
+        )
+
+        self.client.force_authenticate(superuser)
+
+        response = self.client.get("/api/documents/", format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.json()["results"]
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["user_can_change"])
+
     @mock.patch("allauth.mfa.adapter.DefaultMFAAdapter.is_mfa_enabled")
-    def test_basic_auth_mfa_enabled(self, mock_is_mfa_enabled):
+    def test_basic_auth_mfa_enabled(self, mock_is_mfa_enabled) -> None:
         """
         GIVEN:
             - User with MFA enabled
@@ -521,7 +602,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         THEN:
             - MFA required error is returned
         """
-        user1 = User.objects.create_user(username="user1")
+        user1 = UserFactory(username="user1")
         user1.set_password("password")
         user1.save()
 
@@ -536,7 +617,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         self.assertEqual(response.data["detail"], "MFA required")
 
     @mock.patch("allauth.mfa.totp.internal.auth.TOTP.validate_code")
-    def test_get_token_mfa_enabled(self, mock_validate_code):
+    def test_get_token_mfa_enabled(self, mock_validate_code) -> None:
         """
         GIVEN:
             - User with MFA enabled
@@ -545,7 +626,7 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
         THEN:
             - MFA code is required
         """
-        user1 = User.objects.create_user(username="user1")
+        user1 = UserFactory(username="user1")
         user1.set_password("password")
         user1.save()
 
@@ -604,13 +685,13 @@ class TestApiAuth(DirectoriesMixin, APITestCase):
 class TestApiUser(DirectoriesMixin, APITestCase):
     ENDPOINT = "/api/users/"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
-        self.user = User.objects.create_superuser(username="temp_admin")
+        self.user = UserFactory(username="temp_admin", superuser=True)
         self.client.force_authenticate(user=self.user)
 
-    def test_get_users(self):
+    def test_get_users(self) -> None:
         """
         GIVEN:
             - Configured users
@@ -638,7 +719,7 @@ class TestApiUser(DirectoriesMixin, APITestCase):
         self.assertEqual(returned_user2["first_name"], user1.first_name)
         self.assertEqual(returned_user2["last_name"], user1.last_name)
 
-    def test_create_user(self):
+    def test_create_user(self) -> None:
         """
         WHEN:
             - API request is made to add a user account
@@ -666,7 +747,7 @@ class TestApiUser(DirectoriesMixin, APITestCase):
         self.assertEqual(returned_user1.first_name, user1["first_name"])
         self.assertEqual(returned_user1.last_name, user1["last_name"])
 
-    def test_delete_user(self):
+    def test_delete_user(self) -> None:
         """
         GIVEN:
             - Existing user account
@@ -693,7 +774,7 @@ class TestApiUser(DirectoriesMixin, APITestCase):
 
         self.assertEqual(User.objects.count(), nUsers - 1)
 
-    def test_update_user(self):
+    def test_update_user(self) -> None:
         """
         GIVEN:
             - Existing user accounts
@@ -740,7 +821,7 @@ class TestApiUser(DirectoriesMixin, APITestCase):
         self.assertEqual(returned_user2.first_name, "Updated Name 2")
         self.assertNotEqual(returned_user2.password, initial_password)
 
-    def test_deactivate_totp(self):
+    def test_deactivate_totp(self) -> None:
         """
         GIVEN:
             - Existing user account with TOTP enabled
@@ -777,10 +858,8 @@ class TestApiUser(DirectoriesMixin, APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-        regular_user = User.objects.create_user(username="regular_user")
-        regular_user.user_permissions.add(
-            *Permission.objects.all(),
-        )
+        regular_user = UserFactory(username="regular_user")
+        grant_all_global(regular_user)
         self.client.force_authenticate(regular_user)
         Authenticator.objects.create(
             user=user1,
@@ -793,7 +872,7 @@ class TestApiUser(DirectoriesMixin, APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_only_superusers_can_create_or_alter_superuser_status(self):
+    def test_only_superusers_can_create_or_alter_superuser_status(self) -> None:
         """
         GIVEN:
             - Existing user account
@@ -804,9 +883,9 @@ class TestApiUser(DirectoriesMixin, APITestCase):
             - Only superusers can change superuser status
         """
 
-        user1 = User.objects.create_user(username="user1")
-        user1.user_permissions.add(*Permission.objects.all())
-        user2 = User.objects.create_superuser(username="user2")
+        user1 = UserFactory(username="user1")
+        grant_all_global(user1)
+        user2 = UserFactory(username="user2", superuser=True)
 
         self.client.force_authenticate(user1)
 
@@ -828,6 +907,19 @@ class TestApiUser(DirectoriesMixin, APITestCase):
                 {
                     "username": "user3",
                     "is_superuser": True,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        response = self.client.post(
+            f"{self.ENDPOINT}",
+            json.dumps(
+                {
+                    "username": "user4",
+                    "is_superuser": "true",
                 },
             ),
             content_type="application/json",
@@ -867,17 +959,76 @@ class TestApiUser(DirectoriesMixin, APITestCase):
         returned_user1 = User.objects.get(pk=user1.pk)
         self.assertEqual(returned_user1.is_superuser, False)
 
+    def test_only_superusers_can_create_or_alter_staff_status(self) -> None:
+        """
+        GIVEN:
+            - Existing user account
+        WHEN:
+            - API request is made to add a user account with staff status
+            - API request is made to change staff status
+        THEN:
+            - Only superusers can change staff status
+        """
+
+        user1 = UserFactory(username="user1")
+        grant_all_global(user1)
+        user2 = UserFactory(username="user2", superuser=True)
+
+        self.client.force_authenticate(user1)
+
+        response = self.client.patch(
+            f"{self.ENDPOINT}{user1.pk}/",
+            json.dumps(
+                {
+                    "is_staff": "true",
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        response = self.client.post(
+            f"{self.ENDPOINT}",
+            json.dumps(
+                {
+                    "username": "user3",
+                    "is_staff": 1,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_authenticate(user2)
+
+        response = self.client.patch(
+            f"{self.ENDPOINT}{user1.pk}/",
+            json.dumps(
+                {
+                    "is_staff": True,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        returned_user1 = User.objects.get(pk=user1.pk)
+        self.assertEqual(returned_user1.is_staff, True)
+
 
 class TestApiGroup(DirectoriesMixin, APITestCase):
     ENDPOINT = "/api/groups/"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
-        self.user = User.objects.create_superuser(username="temp_admin")
+        self.user = UserFactory(username="temp_admin", superuser=True)
         self.client.force_authenticate(user=self.user)
 
-    def test_get_groups(self):
+    def test_get_groups(self) -> None:
         """
         GIVEN:
             - Configured groups
@@ -899,7 +1050,7 @@ class TestApiGroup(DirectoriesMixin, APITestCase):
 
         self.assertEqual(returned_group1["name"], group1.name)
 
-    def test_create_group(self):
+    def test_create_group(self) -> None:
         """
         WHEN:
             - API request is made to add a group
@@ -922,7 +1073,7 @@ class TestApiGroup(DirectoriesMixin, APITestCase):
 
         self.assertEqual(returned_group1.name, group1["name"])
 
-    def test_delete_group(self):
+    def test_delete_group(self) -> None:
         """
         GIVEN:
             - Existing group
@@ -944,7 +1095,7 @@ class TestApiGroup(DirectoriesMixin, APITestCase):
 
         self.assertEqual(len(Group.objects.all()), 0)
 
-    def test_update_group(self):
+    def test_update_group(self) -> None:
         """
         GIVEN:
             - Existing groups
@@ -972,10 +1123,10 @@ class TestApiGroup(DirectoriesMixin, APITestCase):
 
 
 class TestBulkEditObjectPermissions(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
-        self.temp_admin = User.objects.create_superuser(username="temp_admin")
+        self.temp_admin = UserFactory(username="temp_admin", superuser=True)
         self.client.force_authenticate(user=self.temp_admin)
 
         self.t1 = Tag.objects.create(name="t1")
@@ -987,7 +1138,7 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.user2 = User.objects.create(username="user2")
         self.user3 = User.objects.create(username="user3")
 
-    def test_bulk_object_set_permissions(self):
+    def test_bulk_object_set_permissions(self) -> None:
         """
         GIVEN:
             - Existing objects
@@ -1103,7 +1254,7 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(StoragePath.objects.get(pk=self.sp1.id).owner, self.user3)
 
-    def test_bulk_object_set_permissions_merge(self):
+    def test_bulk_object_set_permissions_merge(self) -> None:
         """
         GIVEN:
             - Existing objects
@@ -1123,7 +1274,7 @@ class TestBulkEditObjectPermissions(APITestCase):
             },
         }
 
-        assign_perm("view_tag", self.user3, self.t1)
+        grant_object(self.user3, self.t1, "view_tag")
         self.t1.owner = self.user3
         self.t1.save()
 
@@ -1178,7 +1329,7 @@ class TestBulkEditObjectPermissions(APITestCase):
         # user3 should be removed
         self.assertNotIn(self.user3, get_users_with_perms(self.t1))
 
-    def test_bulk_edit_object_permissions_insufficient_perms(self):
+    def test_bulk_edit_object_permissions_insufficient_perms(self) -> None:
         """
         GIVEN:
             - Objects owned by user other than logged in user
@@ -1207,7 +1358,238 @@ class TestBulkEditObjectPermissions(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.content, b"Insufficient permissions")
 
-    def test_bulk_edit_object_permissions_validation(self):
+    def test_bulk_edit_object_permissions_shared_object_not_owner(self) -> None:
+        """
+        GIVEN:
+            - Object owned by another user, shared with the logged in user with
+              change permissions
+        WHEN:
+            - bulk_edit_objects API endpoint is called with set_permissions operation
+        THEN:
+            - User is not able to take ownership or change permissions, consistent
+              with the single object API
+        """
+        self.t1.owner = self.user2
+        self.t1.save()
+        grant_object(self.user1, self.t1, "view_tag")
+        grant_object(self.user1, self.t1, "change_tag")
+        grant_global(self.user1, "view_tag", "change_tag")
+        user1 = User.objects.get(pk=self.user1.pk)
+        self.client.force_authenticate(user=user1)
+
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id],
+                    "object_type": "tags",
+                    "operation": "set_permissions",
+                    "owner": user1.id,
+                    "permissions": {
+                        "view": {"users": [user1.id], "groups": []},
+                        "change": {"users": [user1.id], "groups": []},
+                    },
+                    "merge": False,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Tag.objects.get(pk=self.t1.id).owner, self.user2)
+
+        # the single object endpoint refuses the same request
+        response = self.client.patch(
+            f"/api/tags/{self.t1.id}/",
+            {"owner": user1.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Tag.objects.get(pk=self.t1.id).owner, self.user2)
+
+    def test_bulk_edit_object_permissions_all_with_shared_objects(self) -> None:
+        """
+        GIVEN:
+            - Objects owned by the logged in user, unowned objects and objects owned
+              by another user but shared with the logged in user
+        WHEN:
+            - bulk_edit_objects API endpoint is called with set_permissions operation
+              and all = True
+        THEN:
+            - The request is refused and no objects are changed
+        """
+        owned = Tag.objects.create(name="owned", owner=self.user1)
+        shared = Tag.objects.create(name="shared", owner=self.user2)
+        grant_object(self.user1, shared, "view_tag")
+        grant_object(self.user1, shared, "change_tag")
+        grant_global(self.user1, "view_tag", "change_tag")
+        user1 = User.objects.get(pk=self.user1.pk)
+        self.client.force_authenticate(user=user1)
+
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [],
+                    "all": True,
+                    "object_type": "tags",
+                    "operation": "set_permissions",
+                    "permissions": {
+                        "view": {"users": [self.user3.id], "groups": []},
+                        "change": {"users": [self.user3.id], "groups": []},
+                    },
+                    "merge": False,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        # nothing was changed, including the objects the user does own
+        self.assertNotIn(self.user3, get_users_with_perms(owned))
+        self.assertNotIn(self.user3, get_users_with_perms(self.t1))
+        self.assertNotIn(self.user3, get_users_with_perms(shared))
+        self.assertEqual(Tag.objects.get(pk=shared.pk).owner, self.user2)
+
+    def test_bulk_edit_object_delete_shared_object_not_owner(self) -> None:
+        """
+        GIVEN:
+            - Object owned by another user, shared with the logged in user with
+              change and delete permissions
+        WHEN:
+            - bulk_edit_objects API endpoint is called with delete operation
+        THEN:
+            - User is not able to delete the object, consistent with documents
+        """
+        self.t1.owner = self.user2
+        self.t1.save()
+        grant_object(self.user1, self.t1, "view_tag")
+        grant_object(self.user1, self.t1, "change_tag")
+        grant_object(self.user1, self.t1, "delete_tag")
+        grant_global(self.user1, "view_tag", "change_tag", "delete_tag")
+        user1 = User.objects.get(pk=self.user1.pk)
+        self.client.force_authenticate(user=user1)
+
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id],
+                    "object_type": "tags",
+                    "operation": "delete",
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Tag.objects.filter(pk=self.t1.id).exists())
+
+    def test_bulk_object_set_permissions_rejects_empty_permissions(self) -> None:
+        """
+        GIVEN:
+            - Existing objects
+        WHEN:
+            - bulk_edit_objects API endpoint is called with set_permissions
+              operation and an empty permissions dict
+        THEN:
+            - Validation fails rather than silently applying a no-op
+        """
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id],
+                    "object_type": "tags",
+                    "operation": "set_permissions",
+                    "permissions": {},
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_object_set_permissions_rejects_non_dict_permissions(self) -> None:
+        """
+        GIVEN:
+            - Existing objects
+        WHEN:
+            - bulk_edit_objects API endpoint is called with set_permissions
+              operation and a non-dict permissions value
+        THEN:
+            - Validation fails rather than crashing
+        """
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id],
+                    "object_type": "tags",
+                    "operation": "set_permissions",
+                    "permissions": False,
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_object_set_permissions_rejects_unknown_action(self) -> None:
+        """
+        GIVEN:
+            - Existing objects
+        WHEN:
+            - bulk_edit_objects API endpoint is called with set_permissions
+              operation and an unrecognized permission action name
+        THEN:
+            - Validation fails rather than silently no-oping
+        """
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id],
+                    "object_type": "tags",
+                    "operation": "set_permissions",
+                    "permissions": {"not_a_real_action": {"users": [self.user1.id]}},
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_bulk_object_set_permissions_null_users_clears_users(self) -> None:
+        """
+        GIVEN:
+            - An object a user has view permission on
+        WHEN:
+            - bulk_edit_objects API endpoint is called with set_permissions
+              operation, merge off, and an explicit null for the view users
+        THEN:
+            - Request succeeds and null is treated as an empty user list,
+              so the existing view permission is removed
+        """
+        grant_object(self.user1, self.t1, "view_tag")
+
+        response = self.client.post(
+            "/api/bulk_edit_objects/",
+            json.dumps(
+                {
+                    "objects": [self.t1.id],
+                    "object_type": "tags",
+                    "operation": "set_permissions",
+                    "permissions": {"view": {"users": None}},
+                },
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(self.user1, get_users_with_perms(self.t1))
+
+    def test_bulk_edit_object_permissions_validation(self) -> None:
         """
         GIVEN:
             - Existing objects
@@ -1281,12 +1663,12 @@ class TestBulkEditObjectPermissions(APITestCase):
 
 
 class TestFullPermissionsFlag(APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
-        self.admin = User.objects.create_superuser(username="admin")
+        self.admin = UserFactory(username="admin", superuser=True)
 
-    def test_full_perms_flag(self):
+    def test_full_perms_flag(self) -> None:
         """
         GIVEN:
             - API request to list documents

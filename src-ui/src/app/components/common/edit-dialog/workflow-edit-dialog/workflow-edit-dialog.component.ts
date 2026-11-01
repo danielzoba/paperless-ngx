@@ -4,7 +4,8 @@ import {
   moveItemInArray,
 } from '@angular/cdk/drag-drop'
 import { NgTemplateOutlet } from '@angular/common'
-import { Component, OnInit, inject } from '@angular/core'
+import { Component, OnInit, computed, inject, signal } from '@angular/core'
+import { toSignal } from '@angular/core/rxjs-interop'
 import {
   AbstractControl,
   FormArray,
@@ -15,7 +16,7 @@ import {
 } from '@angular/forms'
 import { NgbAccordionModule } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
-import { Subscription, first, takeUntil } from 'rxjs'
+import { Subscription, catchError, map, of, takeUntil } from 'rxjs'
 import { Correspondent } from 'src/app/data/correspondent'
 import { CustomField, CustomFieldDataType } from 'src/app/data/custom-field'
 import { DocumentType } from 'src/app/data/document-type'
@@ -29,6 +30,7 @@ import { StoragePath } from 'src/app/data/storage-path'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
 import { Workflow } from 'src/app/data/workflow'
 import {
+  AISuggestionField,
   WorkflowAction,
   WorkflowActionType,
 } from 'src/app/data/workflow-action'
@@ -46,6 +48,7 @@ import { StoragePathService } from 'src/app/services/rest/storage-path.service'
 import { UserService } from 'src/app/services/rest/user.service'
 import { WorkflowService } from 'src/app/services/rest/workflow.service'
 import { SettingsService } from 'src/app/services/settings.service'
+import { ToastService } from 'src/app/services/toast.service'
 import { CustomFieldQueryExpression } from 'src/app/utils/custom-field-query-element'
 import { ConfirmButtonComponent } from '../../confirm-button/confirm-button.component'
 import {
@@ -139,16 +142,62 @@ export const WORKFLOW_ACTION_OPTIONS = [
     id: WorkflowActionType.Webhook,
     name: $localize`Webhook`,
   },
+  {
+    id: WorkflowActionType.PasswordRemoval,
+    name: $localize`Password removal`,
+  },
+  {
+    id: WorkflowActionType.MoveToTrash,
+    name: $localize`Move to trash`,
+  },
+  {
+    id: WorkflowActionType.RemoteOcr,
+    name: $localize`Remote OCR`,
+  },
+  {
+    id: WorkflowActionType.ApplyAiSuggestions,
+    name: $localize`Apply AI suggestions`,
+  },
+]
+
+export const AI_SUGGESTION_FIELD_OPTIONS = [
+  {
+    id: AISuggestionField.Title,
+    name: $localize`Title`,
+  },
+  {
+    id: AISuggestionField.Tags,
+    name: $localize`Tags`,
+  },
+  {
+    id: AISuggestionField.Correspondent,
+    name: $localize`Correspondent`,
+  },
+  {
+    id: AISuggestionField.DocumentType,
+    name: $localize`Document type`,
+  },
+  {
+    id: AISuggestionField.StoragePath,
+    name: $localize`Storage path`,
+  },
+  {
+    id: AISuggestionField.Created,
+    name: $localize`Created date`,
+  },
 ]
 
 export enum TriggerFilterType {
   TagsAny = 'tags_any',
   TagsAll = 'tags_all',
   TagsNone = 'tags_none',
+  CorrespondentAny = 'correspondent_any',
   CorrespondentIs = 'correspondent_is',
   CorrespondentNot = 'correspondent_not',
+  DocumentTypeAny = 'document_type_any',
   DocumentTypeIs = 'document_type_is',
   DocumentTypeNot = 'document_type_not',
+  StoragePathAny = 'storage_path_any',
   StoragePathIs = 'storage_path_is',
   StoragePathNot = 'storage_path_not',
   CustomFieldQuery = 'custom_field_query',
@@ -172,8 +221,11 @@ type TriggerFilterAggregate = {
   filter_has_tags: number[]
   filter_has_all_tags: number[]
   filter_has_not_tags: number[]
+  filter_has_any_correspondents: number[]
   filter_has_not_correspondents: number[]
+  filter_has_any_document_types: number[]
   filter_has_not_document_types: number[]
+  filter_has_any_storage_paths: number[]
   filter_has_not_storage_paths: number[]
   filter_has_correspondent: number | null
   filter_has_document_type: number | null
@@ -220,6 +272,14 @@ const TRIGGER_FILTER_DEFINITIONS: TriggerFilterDefinition[] = [
     allowMultipleValues: true,
   },
   {
+    id: TriggerFilterType.CorrespondentAny,
+    name: $localize`Has any of these correspondents`,
+    inputType: 'select',
+    allowMultipleEntries: false,
+    allowMultipleValues: true,
+    selectItems: 'correspondents',
+  },
+  {
     id: TriggerFilterType.CorrespondentIs,
     name: $localize`Has correspondent`,
     inputType: 'select',
@@ -244,6 +304,14 @@ const TRIGGER_FILTER_DEFINITIONS: TriggerFilterDefinition[] = [
     selectItems: 'documentTypes',
   },
   {
+    id: TriggerFilterType.DocumentTypeAny,
+    name: $localize`Has any of these document types`,
+    inputType: 'select',
+    allowMultipleEntries: false,
+    allowMultipleValues: true,
+    selectItems: 'documentTypes',
+  },
+  {
     id: TriggerFilterType.DocumentTypeNot,
     name: $localize`Does not have document types`,
     inputType: 'select',
@@ -257,6 +325,14 @@ const TRIGGER_FILTER_DEFINITIONS: TriggerFilterDefinition[] = [
     inputType: 'select',
     allowMultipleEntries: false,
     allowMultipleValues: false,
+    selectItems: 'storagePaths',
+  },
+  {
+    id: TriggerFilterType.StoragePathAny,
+    name: $localize`Has any of these storage paths`,
+    inputType: 'select',
+    allowMultipleEntries: false,
+    allowMultipleValues: true,
     selectItems: 'storagePaths',
   },
   {
@@ -306,6 +382,15 @@ const FILTER_HANDLERS: Record<TriggerFilterType, FilterHandler> = {
     extract: (trigger) => trigger.filter_has_not_tags,
     hasValue: (value) => Array.isArray(value) && value.length > 0,
   },
+  [TriggerFilterType.CorrespondentAny]: {
+    apply: (aggregate, values) => {
+      aggregate.filter_has_any_correspondents = Array.isArray(values)
+        ? [...values]
+        : [values]
+    },
+    extract: (trigger) => trigger.filter_has_any_correspondents,
+    hasValue: (value) => Array.isArray(value) && value.length > 0,
+  },
   [TriggerFilterType.CorrespondentIs]: {
     apply: (aggregate, values) => {
       aggregate.filter_has_correspondent = Array.isArray(values)
@@ -333,6 +418,15 @@ const FILTER_HANDLERS: Record<TriggerFilterType, FilterHandler> = {
     extract: (trigger) => trigger.filter_has_document_type,
     hasValue: (value) => value !== null && value !== undefined,
   },
+  [TriggerFilterType.DocumentTypeAny]: {
+    apply: (aggregate, values) => {
+      aggregate.filter_has_any_document_types = Array.isArray(values)
+        ? [...values]
+        : [values]
+    },
+    extract: (trigger) => trigger.filter_has_any_document_types,
+    hasValue: (value) => Array.isArray(value) && value.length > 0,
+  },
   [TriggerFilterType.DocumentTypeNot]: {
     apply: (aggregate, values) => {
       aggregate.filter_has_not_document_types = Array.isArray(values)
@@ -350,6 +444,15 @@ const FILTER_HANDLERS: Record<TriggerFilterType, FilterHandler> = {
     },
     extract: (trigger) => trigger.filter_has_storage_path,
     hasValue: (value) => value !== null && value !== undefined,
+  },
+  [TriggerFilterType.StoragePathAny]: {
+    apply: (aggregate, values) => {
+      aggregate.filter_has_any_storage_paths = Array.isArray(values)
+        ? [...values]
+        : [values]
+    },
+    extract: (trigger) => trigger.filter_has_any_storage_paths,
+    hasValue: (value) => Array.isArray(value) && value.length > 0,
   },
   [TriggerFilterType.StoragePathNot]: {
     apply: (aggregate, values) => {
@@ -405,23 +508,73 @@ export class WorkflowEditDialogComponent
   public TriggerFilterType = TriggerFilterType
   public filterDefinitions = TRIGGER_FILTER_DEFINITIONS
 
-  private correspondentService: CorrespondentService
-  private documentTypeService: DocumentTypeService
-  private storagePathService: StoragePathService
-  private mailRuleService: MailRuleService
-  private customFieldsService: CustomFieldsService
+  private readonly correspondentService = inject(CorrespondentService)
+  private readonly documentTypeService = inject(DocumentTypeService)
+  private readonly storagePathService = inject(StoragePathService)
+  private readonly mailRuleService = inject(MailRuleService)
+  private readonly customFieldsService = inject(CustomFieldsService)
+  private readonly toastService = inject(ToastService)
+  private relatedObjectLoadErrorShown = false
 
-  templates: Workflow[]
-  correspondents: Correspondent[]
-  documentTypes: DocumentType[]
-  storagePaths: StoragePath[]
-  mailRules: MailRule[]
-  customFields: CustomField[]
-  dateCustomFields: CustomField[]
+  readonly templates = signal<Workflow[]>(undefined)
+  readonly correspondents = toSignal(
+    this.correspondentService.listAll().pipe(
+      map((result) => result.results),
+      catchError((error) => this.handleRelatedObjectLoadError(error))
+    ),
+    { initialValue: undefined as Correspondent[] }
+  )
+  readonly documentTypes = toSignal(
+    this.documentTypeService.listAll().pipe(
+      map((result) => result.results),
+      catchError((error) => this.handleRelatedObjectLoadError(error))
+    ),
+    { initialValue: undefined as DocumentType[] }
+  )
+  readonly storagePaths = toSignal(
+    this.storagePathService.listAll().pipe(
+      map((result) => result.results),
+      catchError((error) => this.handleRelatedObjectLoadError(error))
+    ),
+    { initialValue: undefined as StoragePath[] }
+  )
+  readonly mailRules = toSignal(
+    this.mailRuleService.listAll().pipe(
+      map((result) => result.results),
+      catchError((error) => this.handleRelatedObjectLoadError(error))
+    ),
+    { initialValue: undefined as MailRule[] }
+  )
+  readonly customFields = toSignal(
+    this.customFieldsService.listAll().pipe(
+      map((result) => result.results),
+      catchError((error) => this.handleRelatedObjectLoadError(error))
+    ),
+    { initialValue: undefined as CustomField[] }
+  )
+  readonly dateCustomFields = computed(() =>
+    this.customFields()?.filter((f) => f.data_type === CustomFieldDataType.Date)
+  )
+  private readonly emailEnabledSetting =
+    this.settingsService.getSignal<boolean>(SETTINGS_KEYS.EMAIL_ENABLED)
+  private readonly remoteOcrConfiguredSetting =
+    this.settingsService.getSignal<boolean>(SETTINGS_KEYS.REMOTE_OCR_CONFIGURED)
+  private readonly aiEnabledSetting = this.settingsService.getSignal<boolean>(
+    SETTINGS_KEYS.AI_ENABLED
+  )
+
+  private handleRelatedObjectLoadError(error) {
+    if (!this.relatedObjectLoadErrorShown) {
+      this.relatedObjectLoadErrorShown = true
+      this.toastService.showError(
+        $localize`Some workflow options could not be loaded.`,
+        error
+      )
+    }
+    return of([])
+  }
 
   expandedItem: number = null
-
-  private allowedActionTypes = []
 
   private readonly triggerFilterOptionsMap = new WeakMap<
     FormArray,
@@ -431,43 +584,8 @@ export class WorkflowEditDialogComponent
   constructor() {
     super()
     this.service = inject(WorkflowService)
-    this.correspondentService = inject(CorrespondentService)
-    this.documentTypeService = inject(DocumentTypeService)
-    this.storagePathService = inject(StoragePathService)
-    this.mailRuleService = inject(MailRuleService)
     this.userService = inject(UserService)
     this.settingsService = inject(SettingsService)
-    this.customFieldsService = inject(CustomFieldsService)
-
-    this.correspondentService
-      .listAll()
-      .pipe(first())
-      .subscribe((result) => (this.correspondents = result.results))
-
-    this.documentTypeService
-      .listAll()
-      .pipe(first())
-      .subscribe((result) => (this.documentTypes = result.results))
-
-    this.storagePathService
-      .listAll()
-      .pipe(first())
-      .subscribe((result) => (this.storagePaths = result.results))
-
-    this.mailRuleService
-      .listAll()
-      .pipe(first())
-      .subscribe((result) => (this.mailRules = result.results))
-
-    this.customFieldsService
-      .listAll()
-      .pipe(first())
-      .subscribe((result) => {
-        this.customFields = result.results
-        this.dateCustomFields = this.customFields?.filter(
-          (f) => f.data_type === CustomFieldDataType.Date
-        )
-      })
   }
 
   getCreateTitle() {
@@ -500,11 +618,58 @@ export class WorkflowEditDialogComponent
       this.checkRemovalActionFields.bind(this)
     )
     this.checkRemovalActionFields(this.objectForm.value)
-    this.allowedActionTypes = this.settingsService.get(
-      SETTINGS_KEYS.EMAIL_ENABLED
-    )
-      ? WORKFLOW_ACTION_OPTIONS
-      : WORKFLOW_ACTION_OPTIONS.filter((a) => a.id !== WorkflowActionType.Email)
+  }
+
+  private allowedActionTypes: typeof WORKFLOW_ACTION_OPTIONS = null
+
+  private getAllowedActionTypes() {
+    let allowed = WORKFLOW_ACTION_OPTIONS
+
+    if (!this.emailEnabledSetting()) {
+      allowed = allowed.filter((a) => a.id !== WorkflowActionType.Email)
+    }
+
+    // Remote OCR is decided before the document is parsed, so it is only
+    // offered for workflows that run at consumption.
+    const formWorkflow: Workflow = this.objectForm?.value
+    const remoteOcrUsable =
+      this.remoteOcrConfiguredSetting() &&
+      (formWorkflow?.triggers?.some(
+        (trigger) => trigger.type === WorkflowTriggerType.Consumption
+      ) ||
+        formWorkflow?.actions?.some(
+          (action) => action.type === WorkflowActionType.RemoteOcr
+        ))
+    if (!remoteOcrUsable) {
+      allowed = allowed.filter((a) => a.id !== WorkflowActionType.RemoteOcr)
+    }
+
+    // Only available after consumption. Unlike remote OCR this is hidden only
+    // once every trigger is consumption, so it stays offered on a workflow
+    // that has no triggers yet.
+    const aiSuggestionsUsable =
+      this.aiEnabledSetting() &&
+      (!formWorkflow?.triggers?.length ||
+        formWorkflow.triggers.some(
+          (trigger) => trigger.type !== WorkflowTriggerType.Consumption
+        ) ||
+        formWorkflow.actions?.some(
+          (action) => action.type === WorkflowActionType.ApplyAiSuggestions
+        ))
+    if (!aiSuggestionsUsable) {
+      allowed = allowed.filter(
+        (a) => a.id !== WorkflowActionType.ApplyAiSuggestions
+      )
+    }
+
+    if (
+      this.allowedActionTypes?.length === allowed.length &&
+      this.allowedActionTypes.every((a, i) => a.id === allowed[i].id)
+    ) {
+      return this.allowedActionTypes
+    }
+    this.allowedActionTypes = allowed
+    return allowed
   }
 
   private checkRemovalActionFields(formWorkflow: Workflow) {
@@ -642,8 +807,11 @@ export class WorkflowEditDialogComponent
             filter_has_tags: [],
             filter_has_all_tags: [],
             filter_has_not_tags: [],
+            filter_has_any_correspondents: [],
             filter_has_not_correspondents: [],
+            filter_has_any_document_types: [],
             filter_has_not_document_types: [],
+            filter_has_any_storage_paths: [],
             filter_has_not_storage_paths: [],
             filter_has_correspondent: null,
             filter_has_document_type: null,
@@ -670,10 +838,16 @@ export class WorkflowEditDialogComponent
           trigger.filter_has_tags = aggregate.filter_has_tags
           trigger.filter_has_all_tags = aggregate.filter_has_all_tags
           trigger.filter_has_not_tags = aggregate.filter_has_not_tags
+          trigger.filter_has_any_correspondents =
+            aggregate.filter_has_any_correspondents
           trigger.filter_has_not_correspondents =
             aggregate.filter_has_not_correspondents
+          trigger.filter_has_any_document_types =
+            aggregate.filter_has_any_document_types
           trigger.filter_has_not_document_types =
             aggregate.filter_has_not_document_types
+          trigger.filter_has_any_storage_paths =
+            aggregate.filter_has_any_storage_paths
           trigger.filter_has_not_storage_paths =
             aggregate.filter_has_not_storage_paths
           trigger.filter_has_correspondent =
@@ -856,8 +1030,11 @@ export class WorkflowEditDialogComponent
       case TriggerFilterType.TagsAny:
       case TriggerFilterType.TagsAll:
       case TriggerFilterType.TagsNone:
+      case TriggerFilterType.CorrespondentAny:
       case TriggerFilterType.CorrespondentNot:
+      case TriggerFilterType.DocumentTypeAny:
       case TriggerFilterType.DocumentTypeNot:
+      case TriggerFilterType.StoragePathAny:
       case TriggerFilterType.StoragePathNot:
         return true
       default:
@@ -871,17 +1048,17 @@ export class WorkflowEditDialogComponent
 
   getFilterSelectItems(type: TriggerFilterType) {
     const definition = this.getFilterDefinition(type)
-    if (!definition || definition.inputType !== 'select') {
+    if (definition?.inputType !== 'select') {
       return []
     }
 
     switch (definition.selectItems) {
       case 'correspondents':
-        return this.correspondents
+        return this.correspondents()
       case 'documentTypes':
-        return this.documentTypes
+        return this.documentTypes()
       case 'storagePaths':
-        return this.storagePaths
+        return this.storagePaths()
       default:
         return []
     }
@@ -1133,9 +1310,27 @@ export class WorkflowEditDialogComponent
           headers: new FormControl(action.webhook?.headers),
           include_document: new FormControl(!!action.webhook?.include_document),
         }),
+        passwords: new FormControl(
+          this.formatPasswords(action.passwords ?? [])
+        ),
+        ai_suggestion_fields: new FormControl(
+          action.ai_suggestion_fields ?? []
+        ),
+        ai_create_missing: new FormControl(!!action.ai_create_missing),
+        ai_overwrite_existing: new FormControl(!!action.ai_overwrite_existing),
       }),
       { emitEvent }
     )
+  }
+
+  private formatPasswords(passwords: string[] = []): string {
+    return passwords.join('\n')
+  }
+
+  private parsePasswords(value: string | string[] = ''): string[] {
+    return (Array.isArray(value) ? value : value.split(/[\n,]+/))
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
   }
 
   private updateAllTriggerActionFields(emitEvent: boolean = false) {
@@ -1179,8 +1374,11 @@ export class WorkflowEditDialogComponent
       filter_has_tags: [],
       filter_has_all_tags: [],
       filter_has_not_tags: [],
+      filter_has_any_correspondents: [],
       filter_has_not_correspondents: [],
+      filter_has_any_document_types: [],
       filter_has_not_document_types: [],
+      filter_has_any_storage_paths: [],
       filter_has_not_storage_paths: [],
       filter_custom_field_query: null,
       filter_has_correspondent: null,
@@ -1200,11 +1398,16 @@ export class WorkflowEditDialogComponent
   }
 
   get actionTypeOptions() {
-    return this.allowedActionTypes
+    // Computed on read rather than cached
+    return this.getAllowedActionTypes()
   }
 
   getActionTypeOptionName(type: WorkflowActionType): string {
     return this.actionTypeOptions.find((t) => t.id === type)?.name ?? ''
+  }
+
+  get aiSuggestionFieldOptions() {
+    return AI_SUGGESTION_FIELD_OPTIONS
   }
 
   addAction() {
@@ -1259,6 +1462,10 @@ export class WorkflowEditDialogComponent
         headers: null,
         include_document: false,
       },
+      passwords: [],
+      ai_suggestion_fields: [],
+      ai_create_missing: false,
+      ai_overwrite_existing: false,
     }
     this.object.actions.push(action)
     this.createActionField(action)
@@ -1283,11 +1490,6 @@ export class WorkflowEditDialogComponent
     const actionField = this.actionFields.at(event.previousIndex)
     this.actionFields.removeAt(event.previousIndex)
     this.actionFields.insert(event.currentIndex, actionField)
-    // removing id will effectively re-create the actions in this order
-    this.object.actions.forEach((a) => (a.id = null))
-    this.actionFields.controls.forEach((c) =>
-      c.get('id').setValue(null, { emitEvent: false })
-    )
   }
 
   save(): void {
@@ -1300,6 +1502,7 @@ export class WorkflowEditDialogComponent
         if (action.type !== WorkflowActionType.Email) {
           action.email = null
         }
+        action.passwords = this.parsePasswords(action.passwords as any)
       })
     super.save()
   }

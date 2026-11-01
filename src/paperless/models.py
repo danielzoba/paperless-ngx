@@ -36,20 +36,20 @@ class ModeChoices(models.TextChoices):
     and our own custom setting
     """
 
-    SKIP = ("skip", _("skip"))
-    REDO = ("redo", _("redo"))
+    AUTO = ("auto", _("auto"))
     FORCE = ("force", _("force"))
-    SKIP_NO_ARCHIVE = ("skip_noarchive", _("skip_noarchive"))
+    REDO = ("redo", _("redo"))
+    OFF = ("off", _("off"))
 
 
-class ArchiveFileChoices(models.TextChoices):
+class ArchiveFileGenerationChoices(models.TextChoices):
     """
     Settings to control creation of an archive PDF file
     """
 
-    NEVER = ("never", _("never"))
-    WITH_TEXT = ("with_text", _("with_text"))
+    AUTO = ("auto", _("auto"))
     ALWAYS = ("always", _("always"))
+    NEVER = ("never", _("never"))
 
 
 class CleanChoices(models.TextChoices):
@@ -74,6 +74,38 @@ class ColorConvertChoices(models.TextChoices):
     CMYK = ("CMYK", _("CMYK"))
 
 
+class RemoteOCREngine(models.TextChoices):
+    """
+    Matches to PAPERLESS_REMOTE_OCR_ENGINE
+    """
+
+    AZURE_AI = ("azureai", _("Azure AI Document Intelligence"))
+
+
+class RemoteOCRMode(models.TextChoices):
+    """
+    Matches to PAPERLESS_REMOTE_OCR_MODE
+    """
+
+    ALWAYS = ("always", _("All supported documents"))
+    WORKFLOW_ONLY = ("workflow_only", _("Only when a workflow enables it"))
+
+
+class LLMEmbeddingBackend(models.TextChoices):
+    OPENAI_LIKE = ("openai-like", _("OpenAI-compatible"))
+    HUGGINGFACE = ("huggingface", _("Huggingface"))
+    OLLAMA = ("ollama", _("Ollama"))
+
+
+class LLMBackend(models.TextChoices):
+    """
+    Matches to --llm-backend
+    """
+
+    OPENAI_LIKE = ("openai-like", _("OpenAI-compatible"))
+    OLLAMA = ("ollama", _("Ollama"))
+
+
 class ApplicationConfiguration(AbstractSingletonModel):
     """
     Settings which are common across more than 1 parser
@@ -91,7 +123,7 @@ class ApplicationConfiguration(AbstractSingletonModel):
     Settings for the Tesseract based OCR parser
     """
 
-    pages = models.PositiveIntegerField(
+    pages = models.PositiveSmallIntegerField(
         verbose_name=_("Do OCR from page 1 to this value"),
         null=True,
         validators=[MinValueValidator(1)],
@@ -112,15 +144,15 @@ class ApplicationConfiguration(AbstractSingletonModel):
         choices=ModeChoices.choices,
     )
 
-    skip_archive_file = models.CharField(
-        verbose_name=_("Controls the generation of an archive file"),
+    archive_file_generation = models.CharField(
+        verbose_name=_("Controls archive file generation"),
         null=True,
         blank=True,
-        max_length=16,
-        choices=ArchiveFileChoices.choices,
+        max_length=8,
+        choices=ArchiveFileGenerationChoices.choices,
     )
 
-    image_dpi = models.PositiveIntegerField(
+    image_dpi = models.PositiveSmallIntegerField(
         verbose_name=_("Sets image DPI fallback value"),
         null=True,
         validators=[MinValueValidator(1)],
@@ -240,14 +272,14 @@ class ApplicationConfiguration(AbstractSingletonModel):
     )
 
     # PAPERLESS_CONSUMER_BARCODE_DPI
-    barcode_dpi = models.PositiveIntegerField(
+    barcode_dpi = models.PositiveSmallIntegerField(
         verbose_name=_("Sets the barcode DPI"),
         null=True,
         validators=[MinValueValidator(1)],
     )
 
     # PAPERLESS_CONSUMER_BARCODE_MAX_PAGES
-    barcode_max_pages = models.PositiveIntegerField(
+    barcode_max_pages = models.PositiveSmallIntegerField(
         verbose_name=_("Sets the maximum pages for barcode"),
         null=True,
         validators=[MinValueValidator(1)],
@@ -265,8 +297,154 @@ class ApplicationConfiguration(AbstractSingletonModel):
         null=True,
     )
 
+    # PAPERLESS_CONSUMER_TAG_BARCODE_SPLIT
+    barcode_tag_split = models.BooleanField(
+        verbose_name=_("Enables splitting on tag barcodes"),
+        null=True,
+    )
+
+    # PAPERLESS_CONSUMER_STORE_BARCODE_VALUES
+    barcode_store_values = models.BooleanField(
+        verbose_name=_("Stores the values of detected barcodes"),
+        null=True,
+    )
+
+    """
+    Settings for the remote OCR parser
+    """
+
+    # PAPERLESS_REMOTE_OCR_ENGINE
+    remote_ocr_engine = models.CharField(
+        verbose_name=_("Sets the remote OCR engine"),
+        blank=True,
+        null=True,
+        max_length=32,
+        choices=RemoteOCREngine.choices,
+    )
+
+    # PAPERLESS_REMOTE_OCR_API_KEY
+    remote_ocr_api_key = models.CharField(
+        verbose_name=_("Sets the remote OCR API key"),
+        blank=True,
+        null=True,
+        max_length=1024,
+    )
+
+    # PAPERLESS_REMOTE_OCR_ENDPOINT
+    remote_ocr_endpoint = models.CharField(
+        verbose_name=_("Sets the remote OCR endpoint"),
+        blank=True,
+        null=True,
+        max_length=256,
+    )
+
+    # PAPERLESS_REMOTE_OCR_MODE
+    remote_ocr_mode = models.CharField(
+        verbose_name=_("Sets which documents are sent to the remote OCR engine"),
+        blank=True,
+        null=True,
+        max_length=32,
+        choices=RemoteOCRMode.choices,
+    )
+
+    """
+    AI related settings
+    """
+
+    ai_enabled = models.BooleanField(
+        verbose_name=_("Enables AI features"),
+        null=True,
+    )
+
+    llm_embedding_backend = models.CharField(
+        verbose_name=_("Sets the LLM embedding backend"),
+        blank=True,
+        null=True,
+        max_length=128,
+        choices=LLMEmbeddingBackend.choices,
+    )
+
+    llm_embedding_model = models.CharField(
+        verbose_name=_("Sets the LLM embedding model"),
+        blank=True,
+        null=True,
+        max_length=128,
+    )
+
+    llm_embedding_api_key = models.CharField(
+        verbose_name=_("Sets the LLM embedding API key"),
+        blank=True,
+        null=True,
+        max_length=1024,
+    )
+
+    llm_embedding_endpoint = models.CharField(
+        verbose_name=_("Sets the LLM embedding endpoint, optional"),
+        blank=True,
+        null=True,
+        max_length=256,
+    )
+
+    llm_embedding_chunk_size = models.PositiveSmallIntegerField(
+        verbose_name=_("Sets the LLM embedding chunk size"),
+        null=True,
+        validators=[MinValueValidator(1)],
+    )
+
+    llm_context_size = models.PositiveIntegerField(
+        verbose_name=_("Sets the LLM context size"),
+        null=True,
+        validators=[MinValueValidator(1)],
+    )
+
+    llm_backend = models.CharField(
+        verbose_name=_("Sets the LLM backend"),
+        blank=True,
+        null=True,
+        max_length=128,
+        choices=LLMBackend.choices,
+    )
+
+    llm_model = models.CharField(
+        verbose_name=_("Sets the LLM model"),
+        blank=True,
+        null=True,
+        max_length=128,
+    )
+
+    llm_api_key = models.CharField(
+        verbose_name=_("Sets the LLM API key"),
+        blank=True,
+        null=True,
+        max_length=1024,
+    )
+
+    llm_endpoint = models.CharField(
+        verbose_name=_("Sets the LLM endpoint, optional"),
+        blank=True,
+        null=True,
+        max_length=256,
+    )
+
+    llm_output_language = models.CharField(
+        verbose_name=_("Sets the LLM output language"),
+        blank=True,
+        null=True,
+        max_length=32,
+    )
+
+    llm_request_timeout = models.PositiveSmallIntegerField(
+        verbose_name=_("Sets the LLM timeout in seconds"),
+        null=True,
+        validators=[MinValueValidator(1)],
+    )
+
     class Meta:
         verbose_name = _("paperless application settings")
+        permissions = [
+            ("view_global_statistics", "Can view global object counts"),
+            ("view_system_monitoring", "Can view system status information"),
+        ]
 
     def __str__(self) -> str:  # pragma: no cover
         return "ApplicationConfiguration"

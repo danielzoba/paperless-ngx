@@ -1,18 +1,20 @@
 import { DragDropModule } from '@angular/cdk/drag-drop'
 import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import { provideHttpClientTesting } from '@angular/common/http/testing'
+import { signal } from '@angular/core'
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
 import { By } from '@angular/platform-browser'
-import { NgbModule } from '@ng-bootstrap/ng-bootstrap'
+import { NgbModal, NgbModule } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
-import { of, throwError } from 'rxjs'
+import { Subject, of, throwError } from 'rxjs'
 import { SavedView } from 'src/app/data/saved-view'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { PermissionsService } from 'src/app/services/permissions.service'
 import { CustomFieldsService } from 'src/app/services/rest/custom-fields.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
+import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
 import { ConfirmButtonComponent } from '../../common/confirm-button/confirm-button.component'
 import { CheckComponent } from '../../common/input/check/check.component'
@@ -24,15 +26,29 @@ import { PageHeaderComponent } from '../../common/page-header/page-header.compon
 import { SavedViewsComponent } from './saved-views.component'
 
 const savedViews = [
-  { id: 1, name: 'view1', show_in_sidebar: true, show_on_dashboard: true },
-  { id: 2, name: 'view2', show_in_sidebar: false, show_on_dashboard: false },
+  {
+    id: 1,
+    name: 'view1',
+    icon: 'archive',
+    show_in_sidebar: true,
+    show_on_dashboard: true,
+  },
+  {
+    id: 2,
+    name: 'view2',
+    icon: 'funnel',
+    show_in_sidebar: false,
+    show_on_dashboard: false,
+  },
 ]
 
 describe('SavedViewsComponent', () => {
   let component: SavedViewsComponent
   let fixture: ComponentFixture<SavedViewsComponent>
   let savedViewService: SavedViewService
+  let settingsService: SettingsService
   let toastService: ToastService
+  let modalService: NgbModal
 
   beforeEach(async () => {
     TestBed.configureTestingModule({
@@ -57,6 +73,8 @@ describe('SavedViewsComponent', () => {
           provide: PermissionsService,
           useValue: {
             currentUserCan: () => true,
+            currentUserHasObjectPermissions: () => true,
+            currentUserOwnsObject: () => true,
           },
         },
         {
@@ -77,11 +95,13 @@ describe('SavedViewsComponent', () => {
     }).compileComponents()
 
     savedViewService = TestBed.inject(SavedViewService)
+    settingsService = TestBed.inject(SettingsService)
     toastService = TestBed.inject(ToastService)
+    modalService = TestBed.inject(NgbModal)
     fixture = TestBed.createComponent(SavedViewsComponent)
     component = fixture.componentInstance
 
-    jest.spyOn(savedViewService, 'listAll').mockReturnValue(
+    jest.spyOn(savedViewService, 'list').mockReturnValue(
       of({
         all: savedViews.map((v) => v.id),
         count: savedViews.length,
@@ -94,14 +114,13 @@ describe('SavedViewsComponent', () => {
 
   it('should support save saved views, show error', () => {
     const toastErrorSpy = jest.spyOn(toastService, 'showError')
-    const toastSpy = jest.spyOn(toastService, 'show')
     const savedViewPatchSpy = jest.spyOn(savedViewService, 'patchMany')
-
-    const toggle = fixture.debugElement.query(
-      By.css('.form-check.form-switch input')
-    )
-    toggle.nativeElement.checked = true
-    toggle.nativeElement.dispatchEvent(new Event('change'))
+    const control = component.savedViewsForm
+      .get('savedViews')
+      .get(savedViews[0].id.toString())
+      .get('name')
+    control.setValue(`${savedViews[0].name}-changed`)
+    control.markAsDirty()
 
     // saved views error first
     savedViewPatchSpy.mockReturnValueOnce(
@@ -110,12 +129,13 @@ describe('SavedViewsComponent', () => {
     component.save()
     expect(toastErrorSpy).toHaveBeenCalled()
     expect(savedViewPatchSpy).toHaveBeenCalled()
-    toastSpy.mockClear()
     toastErrorSpy.mockClear()
     savedViewPatchSpy.mockClear()
 
     // succeed saved views
     savedViewPatchSpy.mockReturnValueOnce(of(savedViews as SavedView[]))
+    control.setValue(savedViews[0].name)
+    control.markAsDirty()
     component.save()
     expect(toastErrorSpy).not.toHaveBeenCalled()
     expect(savedViewPatchSpy).toHaveBeenCalled()
@@ -127,30 +147,87 @@ describe('SavedViewsComponent', () => {
     expect(patchSpy).not.toHaveBeenCalled()
 
     const view = savedViews[0]
-    const toggle = fixture.debugElement.query(
-      By.css('.form-check.form-switch input')
-    )
-    toggle.nativeElement.checked = true
-    toggle.nativeElement.dispatchEvent(new Event('change'))
-    // register change
-    component.savedViewsForm.get('savedViews').get(view.id.toString()).value[
-      'show_on_dashboard'
-    ] = !view.show_on_dashboard
+    component.savedViewsForm
+      .get('savedViews')
+      .get(view.id.toString())
+      .get('name')
+      .setValue('changed-view-name')
+    component.savedViewsForm
+      .get('savedViews')
+      .get(view.id.toString())
+      .get('name')
+      .markAsDirty()
     fixture.detectChanges()
 
     component.save()
-    expect(patchSpy).toHaveBeenCalledWith([
-      {
-        id: view.id,
-        name: view.name,
-        show_in_sidebar: view.show_in_sidebar,
-        show_on_dashboard: !view.show_on_dashboard,
-      },
-    ])
+    expect(patchSpy).toHaveBeenCalled()
+    const patchBody = patchSpy.mock.calls[0][0][0]
+    expect(patchBody).toMatchObject({
+      id: view.id,
+      name: 'changed-view-name',
+    })
+    expect(patchBody.show_on_dashboard).toBeUndefined()
+    expect(patchBody.show_in_sidebar).toBeUndefined()
+  })
+
+  it('should persist a changed icon', () => {
+    const patchSpy = jest.spyOn(savedViewService, 'patchMany')
+    const view = savedViews[0]
+    const iconControl = component.savedViewsForm
+      .get('savedViews')
+      .get(view.id.toString())
+      .get('icon')
+
+    iconControl.setValue('bell')
+    iconControl.markAsDirty()
+    component.save()
+
+    expect(patchSpy.mock.calls[0][0][0]).toMatchObject({
+      id: view.id,
+      icon: 'bell',
+    })
+  })
+
+  it('should persist visibility changes to user settings', () => {
+    const patchSpy = jest.spyOn(savedViewService, 'patchMany')
+    const updateVisibilitySpy = jest
+      .spyOn(settingsService, 'updateSavedViewsVisibility')
+      .mockReturnValue(of({ success: true }))
+
+    const dashboardControl = component.savedViewsForm
+      .get('savedViews')
+      .get(savedViews[0].id.toString())
+      .get('show_on_dashboard')
+    dashboardControl.setValue(false)
+    dashboardControl.markAsDirty()
+
+    component.save()
+
+    expect(patchSpy).not.toHaveBeenCalled()
+    expect(updateVisibilitySpy).toHaveBeenCalledWith([], [savedViews[0].id])
+  })
+
+  it('should skip model updates for views that cannot be edited', () => {
+    const patchSpy = jest.spyOn(savedViewService, 'patchMany')
+    const updateVisibilitySpy = jest.spyOn(
+      settingsService,
+      'updateSavedViewsVisibility'
+    )
+    const nameControl = component.savedViewsForm
+      .get('savedViews')
+      .get(savedViews[0].id.toString())
+      .get('name')
+
+    nameControl.disable()
+
+    component.save()
+
+    expect(patchSpy).not.toHaveBeenCalled()
+    expect(updateVisibilitySpy).not.toHaveBeenCalled()
   })
 
   it('should support delete saved view', () => {
-    const toastSpy = jest.spyOn(toastService, 'showInfo')
+    const toastSpy = jest.spyOn(toastService, 'showSuccess')
     const deleteSpy = jest.spyOn(savedViewService, 'delete')
     deleteSpy.mockReturnValue(of(true))
     component.deleteSavedView(savedViews[0] as SavedView)
@@ -162,14 +239,94 @@ describe('SavedViewsComponent', () => {
 
   it('should support reset', () => {
     const view = savedViews[0]
-    component.savedViewsForm.get('savedViews').get(view.id.toString()).value[
-      'show_on_dashboard'
-    ] = !view.show_on_dashboard
+    component.savedViewsForm
+      .get('savedViews')
+      .get(view.id.toString())
+      .get('show_on_dashboard')
+      .setValue(!view.show_on_dashboard)
     component.reset()
     expect(
-      component.savedViewsForm.get('savedViews').get(view.id.toString()).value[
-        'show_on_dashboard'
-      ]
+      component.savedViewsForm
+        .get('savedViews')
+        .get(view.id.toString())
+        .get('show_on_dashboard').value
     ).toEqual(view.show_on_dashboard)
+  })
+
+  it('should page saved views, clamp the page if views are removed', () => {
+    const manyViews = Array.from({ length: 30 }, (_, i) => ({
+      id: i + 1,
+      name: `view${i + 1}`,
+    })) as SavedView[]
+    const listSpy = jest.spyOn(savedViewService, 'list').mockReturnValue(
+      of({
+        all: manyViews.map((v) => v.id),
+        count: manyViews.length,
+        results: manyViews.concat([]),
+      })
+    )
+    component.ngOnInit()
+    fixture.detectChanges()
+    expect(listSpy).toHaveBeenCalledWith(1, 100000, null, false, {
+      full_perms: true,
+    })
+    expect(component.pagedSavedViews()).toHaveLength(25)
+    expect(fixture.debugElement.query(By.css('ngb-pagination'))).not.toBeNull()
+    // all views have controls, not just the current page
+    expect(
+      Object.keys(component.savedViewsForm.get('savedViews').value)
+    ).toHaveLength(30)
+
+    component.page.set(2)
+    expect(component.pagedSavedViews()).toHaveLength(5)
+
+    listSpy.mockReturnValue(
+      of({
+        all: manyViews.slice(0, 25).map((v) => v.id),
+        count: 25,
+        results: manyViews.slice(0, 25),
+      })
+    )
+    component.ngOnInit()
+    expect(component.page()).toEqual(1)
+  })
+
+  it('should support editing permissions', () => {
+    const confirmClicked = new Subject<any>()
+    const modalRef = {
+      componentInstance: {
+        confirmClicked,
+        buttonsEnabled: signal(true),
+        note: signal(null),
+      },
+      close: jest.fn(),
+    } as any
+    jest.spyOn(modalService, 'open').mockReturnValue(modalRef)
+    const patchSpy = jest.spyOn(savedViewService, 'patch')
+    patchSpy.mockReturnValue(of(savedViews[0] as SavedView))
+
+    component.editPermissions(savedViews[0] as SavedView)
+    confirmClicked.next({
+      permissions: {
+        owner: 1,
+        set_permissions: {
+          view: { users: [2], groups: [] },
+          change: { users: [], groups: [3] },
+        },
+      },
+      merge: true,
+    })
+
+    expect(patchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: savedViews[0].id,
+        owner: 1,
+        set_permissions: {
+          view: { users: [2], groups: [] },
+          change: { users: [], groups: [3] },
+        },
+      })
+    )
+    expect(modalRef.close).toHaveBeenCalled()
   })
 })

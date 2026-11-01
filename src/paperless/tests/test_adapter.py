@@ -1,99 +1,108 @@
-from unittest import mock
+import logging
 
+import pytest
 from allauth.account.adapter import get_adapter
+from allauth.account.models import Login
 from allauth.core import context
+from allauth.mfa.totp.internal.auth import TOTP
+from allauth.mfa.totp.internal.auth import generate_totp_secret
 from allauth.socialaccount.adapter import get_adapter as get_social_adapter
-from django.conf import settings
+from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.models import SocialLogin
+from django.contrib.auth.models import AnonymousUser
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
 from django.forms import ValidationError
 from django.http import HttpRequest
-from django.test import TestCase
-from django.test import override_settings
+from django.test import RequestFactory
 from django.urls import reverse
+from pytest_django.fixtures import Settings
+from pytest_mock import MockerFixture
+from rest_framework.authtoken.models import Token
+
+from paperless.adapter import DrfTokenStrategy
+from paperless.adapter import SocialAccountAuthenticateStage
+from paperless_testing.factories import UserFactory
 
 
-class TestCustomAccountAdapter(TestCase):
-    def test_is_open_for_signup(self):
+@pytest.mark.django_db
+class TestCustomAccountAdapter:
+    def test_is_open_for_signup(self, settings: Settings) -> None:
         adapter = get_adapter()
 
         # With no accounts, signups should be allowed
-        self.assertTrue(adapter.is_open_for_signup(None))
+        assert adapter.is_open_for_signup(None)
 
-        User.objects.create_user("testuser")
+        UserFactory(username="testuser")
 
-        # Test when ACCOUNT_ALLOW_SIGNUPS is True
         settings.ACCOUNT_ALLOW_SIGNUPS = True
-        self.assertTrue(adapter.is_open_for_signup(None))
+        assert adapter.is_open_for_signup(None)
 
-        # Test when ACCOUNT_ALLOW_SIGNUPS is False
         settings.ACCOUNT_ALLOW_SIGNUPS = False
-        self.assertFalse(adapter.is_open_for_signup(None))
+        assert not adapter.is_open_for_signup(None)
 
-    def test_is_safe_url(self):
+    def test_is_safe_url(self, settings: Settings) -> None:
         request = HttpRequest()
-        request.get_host = mock.Mock(return_value="example.com")
+        request.get_host = lambda: "example.com"
         with context.request_context(request):
             adapter = get_adapter()
-            with override_settings(ALLOWED_HOSTS=["*"]):
-                # True because request host is same
-                url = "https://example.com"
-                self.assertTrue(adapter.is_safe_url(url))
 
-            url = "https://evil.com"
+            settings.ALLOWED_HOSTS = ["*"]
+            # True because request host is same
+            assert adapter.is_safe_url("https://example.com")
             # False despite wildcard because request host is different
-            self.assertFalse(adapter.is_safe_url(url))
+            assert not adapter.is_safe_url("https://evil.com")
 
             settings.ALLOWED_HOSTS = ["example.com"]
-            url = "https://example.com"
             # True because request host is same
-            self.assertTrue(adapter.is_safe_url(url))
+            assert adapter.is_safe_url("https://example.com")
 
             settings.ALLOWED_HOSTS = ["*", "example.com"]
-            url = "//evil.com"
             # False because request host is not in allowed hosts
-            self.assertFalse(adapter.is_safe_url(url))
+            assert not adapter.is_safe_url("//evil.com")
 
-    @mock.patch("allauth.core.internal.ratelimit.consume", return_value=True)
-    def test_pre_authenticate(self, mock_consume):
+    def test_pre_authenticate(
+        self,
+        settings: Settings,
+        mocker: MockerFixture,
+    ) -> None:
+        mocker.patch("allauth.core.internal.ratelimit.consume", return_value=True)
         adapter = get_adapter()
         request = HttpRequest()
-        request.get_host = mock.Mock(return_value="example.com")
+        request.get_host = lambda: "example.com"
 
         settings.DISABLE_REGULAR_LOGIN = False
         adapter.pre_authenticate(request)
 
         settings.DISABLE_REGULAR_LOGIN = True
-        with self.assertRaises(ValidationError):
+        with pytest.raises(ValidationError):
             adapter.pre_authenticate(request)
 
-    def test_get_reset_password_from_key_url(self):
+    def test_get_reset_password_from_key_url(self, settings: Settings) -> None:
         request = HttpRequest()
-        request.get_host = mock.Mock(return_value="foo.org")
+        request.get_host = lambda: "foo.org"
         with context.request_context(request):
             adapter = get_adapter()
 
-            # Test when PAPERLESS_URL is None
+            settings.PAPERLESS_URL = None
+            settings.ACCOUNT_DEFAULT_HTTP_PROTOCOL = "https"
             expected_url = f"https://foo.org{reverse('account_reset_password_from_key', kwargs={'uidb36': 'UID', 'key': 'KEY'})}"
-            self.assertEqual(
-                adapter.get_reset_password_from_key_url("UID-KEY"),
-                expected_url,
-            )
+            assert adapter.get_reset_password_from_key_url("UID-KEY") == expected_url
 
-            # Test when PAPERLESS_URL is not None
-            with override_settings(PAPERLESS_URL="https://bar.com"):
-                expected_url = f"https://bar.com{reverse('account_reset_password_from_key', kwargs={'uidb36': 'UID', 'key': 'KEY'})}"
-                self.assertEqual(
-                    adapter.get_reset_password_from_key_url("UID-KEY"),
-                    expected_url,
-                )
+            settings.PAPERLESS_URL = "https://bar.com"
+            expected_url = f"https://bar.com{reverse('account_reset_password_from_key', kwargs={'uidb36': 'UID', 'key': 'KEY'})}"
+            assert adapter.get_reset_password_from_key_url("UID-KEY") == expected_url
 
-    @override_settings(ACCOUNT_DEFAULT_GROUPS=["group1", "group2"])
-    def test_save_user_adds_groups(self):
+    def test_save_user_adds_groups(
+        self,
+        settings: Settings,
+        mocker: MockerFixture,
+    ) -> None:
+        settings.ACCOUNT_DEFAULT_GROUPS = ["group1", "group2"]
         Group.objects.create(name="group1")
-        user = User.objects.create_user("testuser")
+        user = UserFactory(username="testuser")
         adapter = get_adapter()
-        form = mock.Mock(
+        form = mocker.MagicMock(
             cleaned_data={
                 "username": "testuser",
                 "email": "user@example.com",
@@ -102,82 +111,250 @@ class TestCustomAccountAdapter(TestCase):
 
         user = adapter.save_user(HttpRequest(), user, form, commit=True)
 
-        self.assertEqual(user.groups.count(), 1)
-        self.assertTrue(user.groups.filter(name="group1").exists())
-        self.assertFalse(user.groups.filter(name="group2").exists())
+        assert user.groups.count() == 1
+        assert user.groups.filter(name="group1").exists()
+        assert not user.groups.filter(name="group2").exists()
 
-    def test_fresh_install_save_creates_superuser(self):
+    def test_fresh_install_save_creates_superuser(self, mocker: MockerFixture) -> None:
         adapter = get_adapter()
-        form = mock.Mock(
+        form = mocker.MagicMock(
             cleaned_data={
                 "username": "testuser",
                 "email": "user@paperless-ngx.com",
             },
         )
         user = adapter.save_user(HttpRequest(), User(), form, commit=True)
-        self.assertTrue(user.is_superuser)
+        assert user.is_superuser
 
-        # Next time, it should not create a superuser
-        form = mock.Mock(
+        form = mocker.MagicMock(
             cleaned_data={
                 "username": "testuser2",
                 "email": "user2@paperless-ngx.com",
             },
         )
         user2 = adapter.save_user(HttpRequest(), User(), form, commit=True)
-        self.assertFalse(user2.is_superuser)
+        assert not user2.is_superuser
 
 
-class TestCustomSocialAccountAdapter(TestCase):
-    def test_is_open_for_signup(self):
-        adapter = get_social_adapter()
-
-        # Test when SOCIALACCOUNT_ALLOW_SIGNUPS is True
-        settings.SOCIALACCOUNT_ALLOW_SIGNUPS = True
-        self.assertTrue(adapter.is_open_for_signup(None, None))
-
-        # Test when SOCIALACCOUNT_ALLOW_SIGNUPS is False
-        settings.SOCIALACCOUNT_ALLOW_SIGNUPS = False
-        self.assertFalse(adapter.is_open_for_signup(None, None))
-
-    def test_get_connect_redirect_url(self):
-        adapter = get_social_adapter()
-        request = None
-        socialaccount = None
-
-        # Test the default URL
-        expected_url = reverse("base")
-        self.assertEqual(
-            adapter.get_connect_redirect_url(request, socialaccount),
-            expected_url,
+@pytest.mark.django_db
+class TestSocialAccountAuthenticateStage:
+    @staticmethod
+    def _requires_mfa(user: User, extra_data: dict | None) -> bool:
+        signal_kwargs = None
+        if extra_data is not None:
+            account = SocialAccount(
+                provider="openid_connect",
+                uid="uid",
+                extra_data=extra_data,
+            )
+            signal_kwargs = {"sociallogin": SocialLogin(user=user, account=account)}
+        request = RequestFactory().get("/")
+        request.session = {}
+        stage = SocialAccountAuthenticateStage(
+            None,
+            request,
+            Login(user=user, signal_kwargs=signal_kwargs),
         )
+        response, cont = stage.handle()
+        assert cont is True
+        requires_mfa = response is not None
+        assert stage.state.get("authentication_required", False) is requires_mfa
+        if requires_mfa:
+            assert response.status_code == 302
+            assert response.url == reverse("mfa_authenticate")
+        return requires_mfa
 
-    @override_settings(SOCIAL_ACCOUNT_DEFAULT_GROUPS=["group1", "group2"])
-    def test_save_user_adds_groups(self):
+    def test_stage_replaces_allauth_stage(self) -> None:
+        stages = get_adapter().get_login_stages()
+
+        assert "paperless.adapter.SocialAccountAuthenticateStage" in stages
+        assert "allauth.mfa.stages.AuthenticateStage" not in stages
+
+    @pytest.mark.parametrize(
+        ("trusted_amr", "extra_data", "expected"),
+        [
+            pytest.param(
+                ["mfa"],
+                {"id_token": {"amr": ["pwd", "mfa"]}},
+                False,
+                id="trusted-amr",
+            ),
+            pytest.param(
+                ["phr"],
+                {"id_token": {"amr": ["otp"]}},
+                True,
+                id="untrusted-amr",
+            ),
+            pytest.param([], {"id_token": {"amr": ["mfa"]}}, True, id="setting-unset"),
+            pytest.param(["mfa"], {"id_token": {}}, True, id="no-amr-claim"),
+            pytest.param(
+                ["mfa"],
+                {"userinfo": {"amr": ["mfa"]}},
+                True,
+                id="userinfo-only",
+            ),
+            pytest.param(["m"], {"id_token": {"amr": "mfa"}}, True, id="string-amr"),
+            pytest.param(
+                ["mfa"],
+                {"id_token": {"amr": {"mfa": 1}}},
+                True,
+                id="dict-amr",
+            ),
+            pytest.param(
+                ["mfa"],
+                {"id_token": {"amr": [["mfa"]]}},
+                True,
+                id="nested-amr",
+            ),
+            pytest.param(
+                ["mfa"],
+                {"id_token": {"amr": ["mfa", 1]}},
+                True,
+                id="mixed-amr",
+            ),
+            pytest.param(["mfa"], {"id_token": {"amr": None}}, True, id="null-amr"),
+            pytest.param(["mfa"], {"id_token": {"amr": []}}, True, id="empty-amr"),
+            pytest.param(["mfa"], {"id_token": "mfa"}, True, id="string-id-token"),
+            pytest.param(["mfa"], {"id_token": ["mfa"]}, True, id="list-id-token"),
+            pytest.param(["mfa"], {"id_token": None}, True, id="null-id-token"),
+            pytest.param(["mfa"], None, True, id="regular-login"),
+        ],
+    )
+    def test_mfa_skipped_only_for_trusted_amr(
+        self,
+        settings: Settings,
+        trusted_amr: list[str],
+        extra_data: dict | None,
+        *,
+        expected: bool,
+    ) -> None:
+        """
+        GIVEN:
+            - A user with TOTP enabled
+        WHEN:
+            - The user logs in, via a social account or not
+        THEN:
+            - The 2FA prompt is only skipped if the ID token's amr claim contains
+              one of SOCIAL_ACCOUNT_MFA_TRUSTED_AMR
+        """
+        settings.SOCIAL_ACCOUNT_MFA_TRUSTED_AMR = trusted_amr
+        user = UserFactory(username="testuser")
+        TOTP.activate(user, generate_totp_secret())
+
+        assert self._requires_mfa(user, extra_data) is expected
+
+    def test_no_mfa_for_user_without_authenticator(self, settings: Settings) -> None:
+        settings.SOCIAL_ACCOUNT_MFA_TRUSTED_AMR = ["mfa"]
+        user = UserFactory(username="testuser")
+
+        assert not self._requires_mfa(user, {"id_token": {"amr": ["pwd"]}})
+
+
+class TestCustomSocialAccountAdapter:
+    @pytest.mark.django_db
+    def test_is_open_for_signup(self, settings: Settings) -> None:
+        adapter = get_social_adapter()
+
+        settings.SOCIALACCOUNT_ALLOW_SIGNUPS = True
+        assert adapter.is_open_for_signup(None, None)
+
+        settings.SOCIALACCOUNT_ALLOW_SIGNUPS = False
+        assert not adapter.is_open_for_signup(None, None)
+
+    def test_get_connect_redirect_url(self) -> None:
+        adapter = get_social_adapter()
+        assert adapter.get_connect_redirect_url(None, None) == reverse("base")
+
+    @pytest.mark.django_db
+    def test_save_user_adds_groups(
+        self,
+        settings: Settings,
+        mocker: MockerFixture,
+    ) -> None:
+        settings.SOCIAL_ACCOUNT_DEFAULT_GROUPS = ["group1", "group2"]
         Group.objects.create(name="group1")
         adapter = get_social_adapter()
-        request = HttpRequest()
-        user = User.objects.create_user("testuser")
-        sociallogin = mock.Mock(
-            user=user,
-        )
+        user = UserFactory(username="testuser")
+        sociallogin = mocker.MagicMock(user=user)
 
-        user = adapter.save_user(request, sociallogin, None)
+        user = adapter.save_user(HttpRequest(), sociallogin, None)
 
-        self.assertEqual(user.groups.count(), 1)
-        self.assertTrue(user.groups.filter(name="group1").exists())
-        self.assertFalse(user.groups.filter(name="group2").exists())
+        assert user.groups.count() == 1
+        assert user.groups.filter(name="group1").exists()
+        assert not user.groups.filter(name="group2").exists()
 
-    def test_error_logged_on_authentication_error(self):
+    def test_error_logged_on_authentication_error(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         adapter = get_social_adapter()
-        request = HttpRequest()
-        with self.assertLogs("paperless.auth", level="INFO") as log_cm:
+        with caplog.at_level(logging.INFO, logger="paperless.auth"):
             adapter.on_authentication_error(
-                request,
+                HttpRequest(),
                 provider="test-provider",
                 error="Error",
                 exception="Test authentication error",
             )
-        self.assertTrue(
-            any("Test authentication error" in message for message in log_cm.output),
-        )
+        assert any("Test authentication error" in msg for msg in caplog.messages)
+
+
+@pytest.mark.django_db
+class TestDrfTokenStrategy:
+    def test_create_access_token_creates_new_token(self) -> None:
+        """
+        GIVEN:
+            - A user with no existing DRF token
+        WHEN:
+            - create_access_token is called
+        THEN:
+            - A new token is created and its key is returned
+        """
+        user = UserFactory(username="testuser")
+        request = HttpRequest()
+        request.user = user
+
+        strategy = DrfTokenStrategy()
+        token_key = strategy.create_access_token(request)
+
+        assert token_key is not None
+        assert Token.objects.filter(user=user).exists()
+        assert token_key == Token.objects.get(user=user).key
+
+    def test_create_access_token_returns_existing_token(self) -> None:
+        """
+        GIVEN:
+            - A user with an existing DRF token
+        WHEN:
+            - create_access_token is called again
+        THEN:
+            - The same token key is returned (no new token created)
+        """
+        user = UserFactory(username="testuser")
+        existing_token = Token.objects.create(user=user)
+
+        request = HttpRequest()
+        request.user = user
+
+        strategy = DrfTokenStrategy()
+        token_key = strategy.create_access_token(request)
+
+        assert token_key == existing_token.key
+        assert Token.objects.filter(user=user).count() == 1
+
+    def test_create_access_token_returns_none_for_unauthenticated_user(self) -> None:
+        """
+        GIVEN:
+            - An unauthenticated request
+        WHEN:
+            - create_access_token is called
+        THEN:
+            - None is returned and no token is created
+        """
+        request = HttpRequest()
+        request.user = AnonymousUser()
+
+        strategy = DrfTokenStrategy()
+        token_key = strategy.create_access_token(request)
+
+        assert token_key is None
+        assert Token.objects.count() == 0

@@ -1,0 +1,522 @@
+from __future__ import annotations
+
+from datetime import UTC
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+import pytest
+import tantivy
+import time_machine
+
+from documents.search._backend import build_permission_filter
+from documents.search._errors import InvalidDateQuery
+from documents.search._errors import InvalidNumberQuery
+from documents.search._errors import MultipleSearchQueryErrors
+from documents.search._errors import SearchQueryError
+from documents.search._query import parse_simple_text_highlight_query
+from documents.search._query import parse_user_query
+from documents.search._schema import build_schema
+from documents.search._tokenizer import register_tokenizers
+
+if TYPE_CHECKING:
+    from django.contrib.auth.base_user import AbstractBaseUser
+
+pytestmark = pytest.mark.search
+
+
+@pytest.fixture(scope="module")
+def populated_index() -> tantivy.Index:
+    """An index holding one document, so a query matching nothing is
+    distinguishable from one matching everything."""
+    idx = tantivy.Index(build_schema(), path=None)
+    register_tokenizers(idx, "")
+    writer = idx.writer()
+    doc = tantivy.Document()
+    doc.add_unsigned("id", 1)
+    doc.add_text("content", "needle in indexed content")
+    writer.add_document(doc)
+    writer.commit()
+    idx.reload()
+    return idx
+
+
+def _highlight_hit_count(index: tantivy.Index, raw_query: str) -> int:
+    query = parse_simple_text_highlight_query(index, raw_query)
+    return index.searcher().search(query, limit=1).count
+
+
+class TestParseUserQuery:
+    """parse_user_query runs the full preprocessing pipeline."""
+
+    def test_returns_tantivy_query(self, query_index: tantivy.Index) -> None:
+        """
+        GIVEN:
+            - An in-memory index built from build_schema()
+        WHEN:
+            - parse_user_query() parses plain text ("invoice")
+        THEN:
+            - It returns a tantivy.Query, the object type callers depend on
+        """
+        assert isinstance(parse_user_query(query_index, "invoice", UTC), tantivy.Query)
+
+    @pytest.mark.parametrize(
+        "raw_query",
+        [
+            pytest.param("invoice", id="plain_text"),
+            pytest.param("created:today", id="date_keyword"),
+            pytest.param("created:[2005 to 2009]", id="whoosh_date_range"),
+            pytest.param('added:"previous month"', id="quoted_date_phrase"),
+            pytest.param("title:202[0-1]*", id="bracket_class_wildcard"),
+        ],
+    )
+    def test_fuzzy_mode_does_not_raise(
+        self,
+        query_index: tantivy.Index,
+        settings,
+        raw_query: str,
+    ) -> None:
+        """
+        GIVEN:
+            - Fuzzy matching enabled (ADVANCED_FUZZY_SEARCH_THRESHOLD set),
+              and a query using whoosh grammar the widened emit still has
+              to handle correctly
+        WHEN:
+            - parse_user_query() parses it
+        THEN:
+            - It returns a tantivy.Query rather than raising: the fuzzy
+              side must degrade gracefully instead of failing the whole
+              query
+        """
+        settings.ADVANCED_FUZZY_SEARCH_THRESHOLD = 0.5
+        assert isinstance(parse_user_query(query_index, raw_query, UTC), tantivy.Query)
+
+    def test_date_keyword_resolves_without_raising(
+        self,
+        query_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - A frozen "now" and a query using a date keyword ("today")
+        WHEN:
+            - parse_user_query() parses it (whoosh-compat's DateParserPlugin
+              resolves "today" against the AST directly - no string rewrite
+              to an ISO range happens anywhere in this pipeline)
+        THEN:
+            - The emitted tantivy query builds cleanly, returning a
+              tantivy.Query
+        """
+        with time_machine.travel(datetime(2026, 3, 28, 12, 0, tzinfo=UTC), tick=False):
+            q = parse_user_query(query_index, "created:today", UTC)
+        assert isinstance(q, tantivy.Query)
+
+    @pytest.mark.parametrize(
+        "raw_query",
+        [
+            pytest.param("h52.1 - kurzsichtigkeit", id="icd_code_dash_description"),
+            pytest.param("H52.1 - asd", id="icd_code_uppercase"),
+            pytest.param("h52.1 -", id="trailing_minus"),
+            pytest.param(". -", id="dot_trailing_minus"),
+            pytest.param("h52. -", id="partial_code_trailing_minus"),
+            pytest.param(".12 -", id="dot_number_trailing_minus"),
+            pytest.param("h52.1 - ku", id="partial_word_after_dash"),
+        ],
+    )
+    def test_spaced_dash_queries_do_not_raise(
+        self,
+        query_index: tantivy.Index,
+        raw_query: str,
+    ) -> None:
+        """
+        GIVEN:
+            - A query in the ICD-code-with-spaced-dash shape that previously
+              broke parsing (e.g. "h52.1 - kurzsichtigkeit")
+        WHEN:
+            - parse_user_query() parses it
+        THEN:
+            - It returns a tantivy.Query rather than raising
+        """
+        assert isinstance(parse_user_query(query_index, raw_query, UTC), tantivy.Query)
+
+    def test_invalid_date_propagates_not_swallowed(
+        self,
+        query_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - A query with an invalid date value ("created:202023")
+        WHEN:
+            - parse_user_query() parses it
+        THEN:
+            - It raises InvalidDateQuery naming the field and value, rather
+              than falling back to silently parsing the raw (invalid) date;
+              a bad date diagnostic from whoosh-compat always maps to
+              InvalidDateQuery and must propagate so the view can return a
+              400
+        """
+        with pytest.raises(InvalidDateQuery) as exc_info:
+            parse_user_query(query_index, "created:202023", UTC)
+        assert exc_info.value.field == "created"
+        assert exc_info.value.value == "202023"
+
+    def test_invalid_number_raises_invalid_number_query(
+        self,
+        query_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - A query with an invalid numeric value ("asn:notanumber")
+        WHEN:
+            - parse_user_query() parses it
+        THEN:
+            - It raises InvalidNumberQuery naming the field and value
+        """
+        with pytest.raises(InvalidNumberQuery) as exc_info:
+            parse_user_query(query_index, "asn:notanumber", UTC)
+        assert exc_info.value.field == "asn"
+        assert exc_info.value.value == "notanumber"
+
+    def test_multiple_bad_fields_raise_multiple_search_query_errors(
+        self,
+        query_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - A query with two independently invalid fields
+              ("created:notadate AND asn:notanumber")
+        WHEN:
+            - parse_user_query() parses it
+        THEN:
+            - It raises MultipleSearchQueryErrors aggregating both
+              underlying errors (one InvalidDateQuery, one
+              InvalidNumberQuery), rather than surfacing only the first
+        """
+        with pytest.raises(MultipleSearchQueryErrors) as exc_info:
+            parse_user_query(
+                query_index,
+                "created:notadate AND asn:notanumber",
+                UTC,
+            )
+        assert len(exc_info.value.errors) == 2
+        kinds = {type(e) for e in exc_info.value.errors}
+        assert kinds == {InvalidDateQuery, InvalidNumberQuery}
+
+
+class TestParseSimpleTextHighlightQuery:
+    """parse_simple_text_highlight_query must not raise on natural-language queries."""
+
+    @pytest.mark.parametrize(
+        "raw_query",
+        [
+            pytest.param("h52.1 - kurzsichtigkeit", id="icd_code_dash_description"),
+            pytest.param("H52.1 - asd", id="icd_code_uppercase"),
+            pytest.param("h52.1 -", id="trailing_minus"),
+            pytest.param(". -", id="dot_trailing_minus"),
+            pytest.param(".12 -", id="dot_number_trailing_minus"),
+            pytest.param("f84.0 - v.a. autismusspektrumstorung", id="complex_icd_dash"),
+        ],
+    )
+    def test_spaced_dash_queries_do_not_raise(
+        self,
+        query_index: tantivy.Index,
+        raw_query: str,
+    ) -> None:
+        """
+        GIVEN:
+            - A query in the ICD-code-with-spaced-dash shape that previously
+              broke parsing (e.g. "h52.1 - kurzsichtigkeit")
+        WHEN:
+            - parse_simple_text_highlight_query() parses it
+        THEN:
+            - It returns a tantivy.Query rather than raising
+        """
+        assert isinstance(
+            parse_simple_text_highlight_query(query_index, raw_query),
+            tantivy.Query,
+        )
+
+    def test_a_real_token_matches_the_corpus(
+        self,
+        populated_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - An index holding one document containing "needle"
+        WHEN:
+            - A highlight query for "needle" is run
+        THEN:
+            - It matches the document; without this control, an empty
+              corpus would make the two assertions below pass for a query
+              that matches every document
+        """
+        assert _highlight_hit_count(populated_index, "needle") == 1
+
+    def test_empty_query_matches_no_document(
+        self,
+        populated_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - An index holding one document
+        WHEN:
+            - A highlight query for the empty string is run
+        THEN:
+            - It matches nothing, rather than degenerating to match-all
+        """
+        assert _highlight_hit_count(populated_index, "") == 0
+
+    def test_all_operators_query_matches_no_document(
+        self,
+        populated_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - An index holding one document
+        WHEN:
+            - A highlight query consisting only of operator characters
+              ("- +", no real terms) is run
+        THEN:
+            - It matches nothing, rather than degenerating to match-all
+        """
+        assert _highlight_hit_count(populated_index, "- +") == 0
+
+
+class TestPermissionFilter:
+    """
+    build_permission_filter tests use an in-memory index - no DB access needed.
+
+    Users are constructed as unsaved model instances (django_user_model(pk=N))
+    so no database round-trip occurs; only .pk is read by build_permission_filter.
+    """
+
+    @pytest.fixture
+    def perm_index(self) -> tantivy.Index:
+        schema = build_schema()
+        idx = tantivy.Index(schema, path=None)
+        register_tokenizers(idx, "")
+        return idx
+
+    def _add_doc(
+        self,
+        idx: tantivy.Index,
+        doc_id: int,
+        owner_id: int | None = None,
+        viewer_ids: tuple[int, ...] = (),
+    ) -> None:
+        writer = idx.writer()
+        doc = tantivy.Document()
+        doc.add_unsigned("id", doc_id)
+        # Only add owner_id field if the document has an owner
+        if owner_id is not None:
+            doc.add_unsigned("owner_id", owner_id)
+        for vid in viewer_ids:
+            doc.add_unsigned("viewer_id", vid)
+        writer.add_document(doc)
+        writer.commit()
+        idx.reload()
+
+    def test_perm_no_owner_visible_to_any_user(
+        self,
+        perm_index: tantivy.Index,
+        django_user_model: type[AbstractBaseUser],
+    ) -> None:
+        """
+        GIVEN:
+            - A document with no owner
+        WHEN:
+            - build_permission_filter() builds a filter for an arbitrary
+              user
+        THEN:
+            - The document is visible (unowned documents are visible to
+              every user)
+        """
+        self._add_doc(perm_index, doc_id=1, owner_id=None)
+        user = django_user_model(pk=99)
+        perm = build_permission_filter(perm_index.schema, user)
+        assert perm_index.searcher().search(perm, limit=10).count == 1
+
+    def test_perm_owned_by_user_is_visible(
+        self,
+        perm_index: tantivy.Index,
+        django_user_model: type[AbstractBaseUser],
+    ) -> None:
+        """
+        GIVEN:
+            - A document owned by user 42
+        WHEN:
+            - build_permission_filter() builds a filter for user 42 (the
+              owner)
+        THEN:
+            - The document is visible
+        """
+        self._add_doc(perm_index, doc_id=2, owner_id=42)
+        user = django_user_model(pk=42)
+        perm = build_permission_filter(perm_index.schema, user)
+        assert perm_index.searcher().search(perm, limit=10).count == 1
+
+    def test_perm_owned_by_other_not_visible(
+        self,
+        perm_index: tantivy.Index,
+        django_user_model: type[AbstractBaseUser],
+    ) -> None:
+        """
+        GIVEN:
+            - A document owned by user 42
+        WHEN:
+            - build_permission_filter() builds a filter for a different
+              user (99)
+        THEN:
+            - The document is not visible
+        """
+        self._add_doc(perm_index, doc_id=3, owner_id=42)
+        user = django_user_model(pk=99)
+        perm = build_permission_filter(perm_index.schema, user)
+        assert perm_index.searcher().search(perm, limit=10).count == 0
+
+    def test_perm_shared_viewer_is_visible(
+        self,
+        perm_index: tantivy.Index,
+        django_user_model: type[AbstractBaseUser],
+    ) -> None:
+        """
+        GIVEN:
+            - A document owned by user 42 and explicitly shared with
+              viewer 99
+        WHEN:
+            - build_permission_filter() builds a filter for the viewer (99)
+        THEN:
+            - The document is visible
+        """
+        self._add_doc(perm_index, doc_id=4, owner_id=42, viewer_ids=(99,))
+        user = django_user_model(pk=99)
+        perm = build_permission_filter(perm_index.schema, user)
+        assert perm_index.searcher().search(perm, limit=10).count == 1
+
+    def test_perm_only_owned_docs_hidden_from_others(
+        self,
+        perm_index: tantivy.Index,
+        django_user_model: type[AbstractBaseUser],
+    ) -> None:
+        """
+        GIVEN:
+            - One document owned by user 10 and one unowned document
+        WHEN:
+            - build_permission_filter() builds a filter for a third user
+              (20, who owns neither)
+        THEN:
+            - Only the unowned document is visible
+        """
+        self._add_doc(perm_index, doc_id=5, owner_id=10)  # owned by 10
+        self._add_doc(perm_index, doc_id=6, owner_id=None)  # unowned
+        user = django_user_model(pk=20)
+        perm = build_permission_filter(perm_index.schema, user)
+        assert perm_index.searcher().search(perm, limit=10).count == 1  # only unowned
+
+
+class TestSearchQueryErrors:
+    def test_invalid_date_query_is_a_search_query_error(self) -> None:
+        """
+        GIVEN:
+            - An InvalidDateQuery constructed with a field and bad value
+        WHEN:
+            - It is inspected
+        THEN:
+            - It is a SearchQueryError carrying the field/value, and both
+              appear in its string form
+        """
+        err = InvalidDateQuery("created", "notadate")
+        assert isinstance(err, SearchQueryError)
+        assert err.field == "created"
+        assert err.value == "notadate"
+        assert "created" in str(err)
+        assert "notadate" in str(err)
+
+    def test_invalid_number_query_is_a_search_query_error(self) -> None:
+        """
+        GIVEN:
+            - An InvalidNumberQuery constructed with a field and bad value
+        WHEN:
+            - It is inspected
+        THEN:
+            - It is a SearchQueryError carrying the field/value, and both
+              appear in its string form
+        """
+        err = InvalidNumberQuery("asn", "notanumber")
+        assert isinstance(err, SearchQueryError)
+        assert err.field == "asn"
+        assert err.value == "notanumber"
+        assert "asn" in str(err)
+        assert "notanumber" in str(err)
+
+    def test_multiple_search_query_errors_aggregates(self) -> None:
+        """
+        GIVEN:
+            - Two sub-errors (an InvalidDateQuery and an InvalidNumberQuery)
+        WHEN:
+            - They are wrapped in a MultipleSearchQueryErrors
+        THEN:
+            - It is a SearchQueryError, preserves both sub-errors, and both
+              fields appear in its string form
+        """
+        sub_errors = [
+            InvalidDateQuery("created", "notadate"),
+            InvalidNumberQuery("asn", "notanumber"),
+        ]
+        err = MultipleSearchQueryErrors(sub_errors)
+        assert isinstance(err, SearchQueryError)
+        assert err.errors == tuple(sub_errors)
+        assert "created" in str(err)
+        assert "asn" in str(err)
+
+
+class TestEmitErrorContract:
+    """A QueryError from emit() surfaces as a SearchQueryError (HTTP 400).
+
+    The Cause-based routing table itself is covered in test_error_routing.py.
+    """
+
+    def test_exists_requires_fast_gets_the_user_facing_rewrite(
+        self,
+        query_index: tantivy.Index,
+    ) -> None:
+        """
+        GIVEN:
+            - A field:* existence query against a non-fast JSON subpath
+              ("notes.user:*")
+        WHEN:
+            - parse_user_query() maps the resulting QueryError
+        THEN:
+            - The user-facing message is paperless's own rewrite, not
+              whoosh-compat's: whoosh-compat's own message advises a
+              host-side fast=True config change the user can't act on, so
+              this checks OUR wording (whoosh-compat's own wording is that
+              library's own test suite's job)
+        """
+        with pytest.raises(SearchQueryError) as exc_info:
+            parse_user_query(query_index, "notes.user:*", UTC)
+        assert str(exc_info.value) == (
+            "Existence searches (field:*) are not supported for field 'notes.user'."
+        )
+
+    def test_a_not_wrapped_unemittable_range_still_becomes_a_search_query_error(
+        self,
+        query_index: tantivy.Index,
+        settings,
+    ) -> None:
+        """
+        GIVEN:
+            - A query combining a fuzzy-eligible free-text word with a NOT
+              wrapping a range on a TEXT field (parses cleanly, but a
+              text-field range cannot be emitted)
+        WHEN:
+            - parse_user_query() runs with fuzzy search enabled
+        THEN:
+            - The emit failure is caught and mapped to a SearchQueryError
+              (400) rather than propagating as a raw QueryError. This
+              fails at the first widened emit (the `tantivy_emit` call
+              inside `emit_widened` in parse_user_query), the same path
+              TestRealQueriesRouteCorrectly::test_text_range_is_a_400_naming_the_field
+              already covers without the NOT wrapper
+        """
+        settings.ADVANCED_FUZZY_SEARCH_THRESHOLD = 0.5
+        with pytest.raises(SearchQueryError):
+            parse_user_query(query_index, "invoice NOT title:[a to b]", UTC)

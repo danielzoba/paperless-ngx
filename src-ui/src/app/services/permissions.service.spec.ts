@@ -6,6 +6,11 @@ import {
   PermissionsService,
 } from './permissions.service'
 
+const VIEW_ONLY_PERMISSION_TYPES = new Set<PermissionType>([
+  PermissionType.GlobalStatistics,
+  PermissionType.SystemMonitoring,
+])
+
 describe('PermissionsService', () => {
   let permissionsService: PermissionsService
 
@@ -103,6 +108,24 @@ describe('PermissionsService', () => {
       actionKey: 'View', // PermissionAction.View
       typeKey: 'Document', // PermissionType.Document
     })
+    expect(
+      permissionsService.getPermissionKeys('view_global_statistics')
+    ).toEqual({
+      actionKey: 'View', // PermissionAction.View
+      typeKey: 'GlobalStatistics', // PermissionType.GlobalStatistics
+    })
+    expect(
+      permissionsService.getPermissionKeys('view_system_monitoring')
+    ).toEqual({
+      actionKey: 'View', // PermissionAction.View
+      typeKey: 'SystemMonitoring', // PermissionType.SystemMonitoring
+    })
+    expect(permissionsService.getPermissionKeys('add_sharelinkbundle')).toEqual(
+      {
+        actionKey: 'Add', // PermissionAction.Add
+        typeKey: 'ShareLinkBundle', // PermissionType.ShareLinkBundle
+      }
+    )
   })
 
   it('correctly checks explicit global permissions', () => {
@@ -252,6 +275,10 @@ describe('PermissionsService', () => {
         'view_sharelink',
         'change_sharelink',
         'delete_sharelink',
+        'add_sharelinkbundle',
+        'view_sharelinkbundle',
+        'change_sharelinkbundle',
+        'delete_sharelinkbundle',
         'add_workflow',
         'view_workflow',
         'change_workflow',
@@ -264,6 +291,8 @@ describe('PermissionsService', () => {
         'change_applicationconfiguration',
         'delete_applicationconfiguration',
         'view_applicationconfiguration',
+        'view_global_statistics',
+        'view_system_monitoring',
       ],
       {
         username: 'testuser',
@@ -274,7 +303,10 @@ describe('PermissionsService', () => {
 
     Object.values(PermissionType).forEach((type) => {
       Object.values(PermissionAction).forEach((action) => {
-        expect(permissionsService.currentUserCan(action, type)).toBeTruthy()
+        expect(permissionsService.currentUserCan(action, type)).toBe(
+          !VIEW_ONLY_PERMISSION_TYPES.has(type) ||
+            action === PermissionAction.View
+        )
       })
     })
 

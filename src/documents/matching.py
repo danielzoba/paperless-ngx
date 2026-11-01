@@ -19,7 +19,7 @@ from documents.models import StoragePath
 from documents.models import Tag
 from documents.models import Workflow
 from documents.models import WorkflowTrigger
-from documents.permissions import get_objects_for_user_owner_aware
+from documents.permissions import permitted_object_ids
 from documents.regex import safe_regex_search
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ def log_reason(
     matching_model: MatchingModel | WorkflowTrigger,
     document: Document,
     reason: str,
-):
+) -> None:
     class_name = type(matching_model).__name__
     name = (
         matching_model.name if hasattr(matching_model, "name") else str(matching_model)
@@ -55,18 +55,20 @@ def match_correspondents(document: Document, classifier: DocumentClassifier, use
         user = document.owner
 
     if user is not None:
-        correspondents = get_objects_for_user_owner_aware(
-            user,
-            "documents.view_correspondent",
-            Correspondent,
+        correspondents = Correspondent.objects.filter(
+            id__in=permitted_object_ids(user, Correspondent, "view_correspondent"),
         )
     else:
         correspondents = Correspondent.objects.all()
 
     return list(
         filter(
-            lambda o: matches(o, document)
-            or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO),
+            lambda o: (
+                matches(o, document)
+                or (
+                    o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO
+                )
+            ),
             correspondents,
         ),
     )
@@ -82,18 +84,20 @@ def match_document_types(document: Document, classifier: DocumentClassifier, use
         user = document.owner
 
     if user is not None:
-        document_types = get_objects_for_user_owner_aware(
-            user,
-            "documents.view_documenttype",
-            DocumentType,
+        document_types = DocumentType.objects.filter(
+            id__in=permitted_object_ids(user, DocumentType, "view_documenttype"),
         )
     else:
         document_types = DocumentType.objects.all()
 
     return list(
         filter(
-            lambda o: matches(o, document)
-            or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO),
+            lambda o: (
+                matches(o, document)
+                or (
+                    o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO
+                )
+            ),
             document_types,
         ),
     )
@@ -108,16 +112,20 @@ def match_tags(document: Document, classifier: DocumentClassifier, user=None):
         user = document.owner
 
     if user is not None:
-        tags = get_objects_for_user_owner_aware(user, "documents.view_tag", Tag)
+        tags = Tag.objects.filter(
+            id__in=permitted_object_ids(user, Tag, "view_tag"),
+        )
     else:
         tags = Tag.objects.all()
 
     return list(
         filter(
-            lambda o: matches(o, document)
-            or (
-                o.matching_algorithm == MatchingModel.MATCH_AUTO
-                and o.pk in predicted_tag_ids
+            lambda o: (
+                matches(o, document)
+                or (
+                    o.matching_algorithm == MatchingModel.MATCH_AUTO
+                    and o.pk in predicted_tag_ids
+                )
             ),
             tags,
         ),
@@ -135,18 +143,20 @@ def match_storage_paths(document: Document, classifier: DocumentClassifier, user
         user = document.owner
 
     if user is not None:
-        storage_paths = get_objects_for_user_owner_aware(
-            user,
-            "documents.view_storagepath",
-            StoragePath,
+        storage_paths = StoragePath.objects.filter(
+            id__in=permitted_object_ids(user, StoragePath, "view_storagepath"),
         )
     else:
         storage_paths = StoragePath.objects.all()
 
     return list(
         filter(
-            lambda o: matches(o, document)
-            or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO),
+            lambda o: (
+                matches(o, document)
+                or (
+                    o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO
+                )
+            ),
             storage_paths,
         ),
     )
@@ -155,7 +165,7 @@ def match_storage_paths(document: Document, classifier: DocumentClassifier, user
 def matches(matching_model: MatchingModel, document: Document):
     search_flags = 0
 
-    document_content = document.content
+    document_content = document.get_effective_content() or ""
 
     # Check that match is not empty
     if not matching_model.match.strip():
@@ -286,7 +296,7 @@ def consumable_document_matches_workflow(
     ]:
         reason = (
             f"Document source {document.source.name} not in"
-            f" {[DocumentSource(int(x)).name for x in trigger.sources]}",
+            f" {[DocumentSource(int(x)).name for x in trigger.sources]}"
         )
         trigger_matched = False
 
@@ -296,8 +306,7 @@ def consumable_document_matches_workflow(
         and document.mailrule_id != trigger.filter_mailrule.pk
     ):
         reason = (
-            f"Document mail rule {document.mailrule_id}"
-            f" != {trigger.filter_mailrule.pk}",
+            f"Document mail rule {document.mailrule_id} != {trigger.filter_mailrule.pk}"
         )
         trigger_matched = False
 
@@ -312,7 +321,7 @@ def consumable_document_matches_workflow(
     ):
         reason = (
             f"Document filename {document.original_file.name} does not match"
-            f" {trigger.filter_filename.lower()}",
+            f" {trigger.filter_filename.lower()}"
         )
         trigger_matched = False
 
@@ -335,7 +344,7 @@ def consumable_document_matches_workflow(
     ):
         reason = (
             f"Document path {document.original_file}"
-            f" does not match {trigger.filter_path}",
+            f" does not match {trigger.filter_path}"
         )
         trigger_matched = False
 
@@ -403,6 +412,18 @@ def existing_document_matches_workflow(
                 f"Document tags {list(document.tags.all())} include excluded tags {list(trigger_has_not_tags_qs)}",
             )
 
+    allowed_correspondent_ids = set(
+        trigger.filter_has_any_correspondents.values_list("id", flat=True),
+    )
+    if (
+        allowed_correspondent_ids
+        and document.correspondent_id not in allowed_correspondent_ids
+    ):
+        return (
+            False,
+            f"Document correspondent {document.correspondent} is not one of {list(trigger.filter_has_any_correspondents.all())}",
+        )
+
     # Document correspondent vs trigger has_correspondent
     if (
         trigger.filter_has_correspondent_id is not None
@@ -424,6 +445,17 @@ def existing_document_matches_workflow(
             f"Document correspondent {document.correspondent} is excluded by {list(trigger.filter_has_not_correspondents.all())}",
         )
 
+    allowed_document_type_ids = set(
+        trigger.filter_has_any_document_types.values_list("id", flat=True),
+    )
+    if allowed_document_type_ids and (
+        document.document_type_id not in allowed_document_type_ids
+    ):
+        return (
+            False,
+            f"Document doc type {document.document_type} is not one of {list(trigger.filter_has_any_document_types.all())}",
+        )
+
     # Document document_type vs trigger has_document_type
     if (
         trigger.filter_has_document_type_id is not None
@@ -443,6 +475,17 @@ def existing_document_matches_workflow(
         return (
             False,
             f"Document doc type {document.document_type} is excluded by {list(trigger.filter_has_not_document_types.all())}",
+        )
+
+    allowed_storage_path_ids = set(
+        trigger.filter_has_any_storage_paths.values_list("id", flat=True),
+    )
+    if allowed_storage_path_ids and (
+        document.storage_path_id not in allowed_storage_path_ids
+    ):
+        return (
+            False,
+            f"Document storage path {document.storage_path} is not one of {list(trigger.filter_has_any_storage_paths.all())}",
         )
 
     # Document storage_path vs trigger has_storage_path
@@ -532,6 +575,10 @@ def prefilter_documents_by_workflowtrigger(
 
     # Correspondent, DocumentType, etc. filtering
 
+    if trigger.filter_has_any_correspondents.exists():
+        documents = documents.filter(
+            correspondent__in=trigger.filter_has_any_correspondents.all(),
+        )
     if trigger.filter_has_correspondent is not None:
         documents = documents.filter(
             correspondent=trigger.filter_has_correspondent,
@@ -541,6 +588,10 @@ def prefilter_documents_by_workflowtrigger(
             correspondent__in=trigger.filter_has_not_correspondents.all(),
         )
 
+    if trigger.filter_has_any_document_types.exists():
+        documents = documents.filter(
+            document_type__in=trigger.filter_has_any_document_types.all(),
+        )
     if trigger.filter_has_document_type is not None:
         documents = documents.filter(
             document_type=trigger.filter_has_document_type,
@@ -550,6 +601,10 @@ def prefilter_documents_by_workflowtrigger(
             document_type__in=trigger.filter_has_not_document_types.all(),
         )
 
+    if trigger.filter_has_any_storage_paths.exists():
+        documents = documents.filter(
+            storage_path__in=trigger.filter_has_any_storage_paths.all(),
+        )
     if trigger.filter_has_storage_path is not None:
         documents = documents.filter(
             storage_path=trigger.filter_has_storage_path,
@@ -604,8 +659,11 @@ def document_matches_workflow(
             "filter_has_tags",
             "filter_has_all_tags",
             "filter_has_not_tags",
+            "filter_has_any_document_types",
             "filter_has_not_document_types",
+            "filter_has_any_correspondents",
             "filter_has_not_correspondents",
+            "filter_has_any_storage_paths",
             "filter_has_not_storage_paths",
         )
     )

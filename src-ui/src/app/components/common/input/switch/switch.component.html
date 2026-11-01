@@ -1,6 +1,6 @@
-<div class="mb-3">
-  <div class="row">
-    @if (!horizontal) {
+<div [class.mb-3]="!compact">
+  <div [class.row]="!compact">
+    @if (!horizontal && !compact) {
       <div class="d-flex align-items-center position-relative hidden-button-container col-md-3">
         <label class="form-label" [for]="inputId" [ngbTooltip]="showUnsetNote && isUnset ? tipContent: null" placement="end">
           {{title}}
@@ -10,19 +10,19 @@
         </label>
         @if (removable) {
           <button type="button" class="btn btn-sm btn-danger position-absolute left-0" (click)="removed.emit(this)">
-            <i-bs  name="x"></i-bs>&nbsp;<ng-container i18n>Remove</ng-container>
+            <i-bs  name="x" class="me-1"></i-bs><ng-container i18n>Remove</ng-container>
           </button>
         }
       </div>
     }
     <div [ngClass]="{'align-items-center': horizontal, 'd-flex': horizontal}">
       <div class="form-check form-switch">
-        <input #inputField type="checkbox" class="form-check-input" [id]="inputId" [(ngModel)]="value" (change)="onChange(value)" (blur)="onTouched()" [disabled]="disabled">
-        @if (horizontal) {
+        <input #inputField type="checkbox" class="form-check-input" [id]="inputId" [(ngModel)]="value" [ngModelOptions]="{standalone: true}" (change)="onChange(value)" (blur)="onTouched()" [disabled]="disabled" [attr.aria-label]="compact ? title : null">
+        @if (horizontal && !compact) {
           <label class="form-check-label" [class.text-muted]="showUnsetNote && isUnset" [for]="inputId" [ngbTooltip]="showUnsetNote && isUnset ? tipContent: null" placement="end">
             {{title}}
             @if (showUnsetNote && isUnset) {
-              &nbsp;<i-bs width="0.9em" height="0.9em" name="exclamation-triangle"></i-bs>
+              <i-bs class="ms-1" width="0.9em" height="0.9em" name="exclamation-triangle"></i-bs>
             }
           </label>
         }

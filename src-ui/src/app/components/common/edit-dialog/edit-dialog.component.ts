@@ -1,10 +1,12 @@
 import {
+  ChangeDetectorRef,
   Directive,
   EventEmitter,
   Input,
   OnInit,
   Output,
   inject,
+  model,
 } from '@angular/core'
 import { FormGroup } from '@angular/forms'
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
@@ -18,6 +20,7 @@ import { ObjectWithId } from 'src/app/data/object-with-id'
 import { ObjectWithPermissions } from 'src/app/data/object-with-permissions'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
 import { User } from 'src/app/data/user'
+import { PermissionsService } from 'src/app/services/permissions.service'
 import { AbstractPaperlessService } from 'src/app/services/rest/abstract-paperless-service'
 import { UserService } from 'src/app/services/rest/user.service'
 import { SettingsService } from 'src/app/services/settings.service'
@@ -31,8 +34,8 @@ export enum EditDialogMode {
 
 @Directive()
 export abstract class EditDialogComponent<
-    T extends ObjectWithPermissions | ObjectWithId,
-  >
+  T extends ObjectWithPermissions | ObjectWithId,
+>
   extends LoadingComponentWithPermissions
   implements OnInit
 {
@@ -42,11 +45,10 @@ export abstract class EditDialogComponent<
   protected activeModal = inject(NgbActiveModal)
   protected userService = inject(UserService)
   protected settingsService = inject(SettingsService)
+  protected permissionsService = inject(PermissionsService)
+  protected changeDetector = inject(ChangeDetectorRef)
 
-  users: User[]
-
-  @Input()
-  dialogMode: EditDialogMode = EditDialogMode.CREATE
+  dialogMode = model(EditDialogMode.CREATE)
 
   @Input()
   object: T
@@ -57,22 +59,20 @@ export abstract class EditDialogComponent<
   @Output()
   failed = new EventEmitter()
 
+  users: User[]
+
   networkActive = false
 
   closeEnabled = false
 
-  error = null
+  error: any = null
 
   abstract getForm(): FormGroup
 
   objectForm: FormGroup = this.getForm()
 
   ngOnInit(): void {
-    if (this.object != null && this.dialogMode !== EditDialogMode.CREATE) {
-      if ((this.object as ObjectWithPermissions).permissions) {
-        this.object['set_permissions'] = this.object['permissions']
-      }
-
+    if (this.object != null && this.dialogMode() !== EditDialogMode.CREATE) {
       this.object['permissions_form'] = {
         owner: (this.object as ObjectWithPermissions).owner,
         set_permissions: (this.object as ObjectWithPermissions).permissions,
@@ -110,10 +110,12 @@ export abstract class EditDialogComponent<
     // wait to enable close button so it doesn't steal focus from input since its the first clickable element in the DOM
     setTimeout(() => {
       this.closeEnabled = true
+      this.changeDetector.markForCheck()
     })
 
     this.userService.listAll().subscribe((r) => {
       this.users = r.results
+      this.changeDetector.markForCheck()
     })
   }
 
@@ -126,7 +128,7 @@ export abstract class EditDialogComponent<
   }
 
   getTitle() {
-    switch (this.dialogMode) {
+    switch (this.dialogMode()) {
       case EditDialogMode.CREATE:
         return this.getCreateTitle()
       case EditDialogMode.EDIT:
@@ -151,20 +153,30 @@ export abstract class EditDialogComponent<
     return Object.assign({}, this.objectForm.value)
   }
 
+  protected shouldSubmitPermissions(): boolean {
+    return (
+      this.dialogMode() === EditDialogMode.CREATE ||
+      this.permissionsService.currentUserOwnsObject(this.object)
+    )
+  }
+
   save() {
     this.error = null
     const formValues = this.getFormValues()
     const permissionsObject: PermissionsFormObject =
       this.objectForm.get('permissions_form')?.value
-    if (permissionsObject) {
+    if (permissionsObject && this.shouldSubmitPermissions()) {
       formValues.owner = permissionsObject.owner
       formValues.set_permissions = permissionsObject.set_permissions
-      delete formValues.permissions_form
     }
+    delete formValues.permissions_form
 
     var newObject = Object.assign(Object.assign({}, this.object), formValues)
+    if (!this.shouldSubmitPermissions()) {
+      delete newObject['set_permissions']
+    }
     var serverResponse: Observable<T>
-    switch (this.dialogMode) {
+    switch (this.dialogMode()) {
       case EditDialogMode.CREATE:
         serverResponse = this.service.create(newObject)
         break
@@ -183,6 +195,7 @@ export abstract class EditDialogComponent<
         this.error = error.error
         this.networkActive = false
         this.failed.next(error)
+        this.changeDetector.markForCheck()
       },
     })
   }

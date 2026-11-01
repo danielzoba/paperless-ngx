@@ -1,10 +1,9 @@
-import { AsyncPipe } from '@angular/common'
-import { Component, OnDestroy, OnInit, inject } from '@angular/core'
+import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
 import { ActivatedRoute } from '@angular/router'
 import { NgbDropdownModule, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
-import { Subject, delay, first, takeUntil, tap } from 'rxjs'
+import { Subject, first, takeUntil, tap } from 'rxjs'
 import { MailAccount, MailAccountType } from 'src/app/data/mail-account'
 import { MailRule } from 'src/app/data/mail-rule'
 import { ObjectWithPermissions } from 'src/app/data/object-with-permissions'
@@ -37,7 +36,6 @@ import { ProcessedMailDialogComponent } from './processed-mail-dialog/processed-
     PageHeaderComponent,
     IfPermissionsDirective,
     IfOwnerDirective,
-    AsyncPipe,
     FormsModule,
     ReactiveFormsModule,
     NgbDropdownModule,
@@ -48,8 +46,8 @@ export class MailComponent
   extends ComponentWithPermissions
   implements OnInit, OnDestroy
 {
-  mailAccountService = inject(MailAccountService)
-  mailRuleService = inject(MailRuleService)
+  private readonly mailAccountService = inject(MailAccountService)
+  private readonly mailRuleService = inject(MailRuleService)
   private toastService = inject(ToastService)
   private modalService = inject(NgbModal)
   permissionsService = inject(PermissionsService)
@@ -58,8 +56,17 @@ export class MailComponent
 
   public MailAccountType = MailAccountType
 
-  mailAccounts: MailAccount[] = []
-  mailRules: MailRule[] = []
+  readonly mailAccounts = signal<MailAccount[]>([])
+
+  private setMailAccounts(accounts: MailAccount[]) {
+    this.mailAccounts.set(accounts)
+    this.mailAccountsById.set(
+      new Map(accounts.map((account) => [account.id, account]))
+    )
+  }
+  readonly mailAccountsById = signal<Map<number, MailAccount>>(new Map())
+
+  readonly mailRules = signal<MailRule[]>([])
 
   unsubscribeNotifier: Subject<any> = new Subject()
   oAuthAccountId: number
@@ -72,10 +79,10 @@ export class MailComponent
     return this.settingsService.get(SETTINGS_KEYS.OUTLOOK_OAUTH_URL)
   }
 
-  public loadingRules: boolean = true
-  public showRules: boolean = false
-  public loadingAccounts: boolean = true
-  public showAccounts: boolean = false
+  readonly loadingRules = signal(true)
+  readonly showRules = signal(false)
+  readonly loadingAccounts = signal(true)
+  readonly showAccounts = signal(false)
 
   ngOnInit(): void {
     this.mailAccountService
@@ -84,23 +91,21 @@ export class MailComponent
         first(),
         takeUntil(this.unsubscribeNotifier),
         tap((r) => {
-          this.mailAccounts = r.results
+          this.setMailAccounts(r.results)
+          this.loadingAccounts.set(false)
+          this.showAccounts.set(true)
           if (this.oAuthAccountId) {
             this.editMailAccount(
-              this.mailAccounts.find(
+              this.mailAccounts().find(
                 (account) => account.id === this.oAuthAccountId
               )
             )
           }
-        }),
-        delay(100)
+        })
       )
       .subscribe({
-        next: () => {
-          this.loadingAccounts = false
-          this.showAccounts = true
-        },
         error: (e) => {
+          this.loadingAccounts.set(false)
           this.toastService.showError(
             $localize`Error retrieving mail accounts`,
             e
@@ -114,16 +119,14 @@ export class MailComponent
         first(),
         takeUntil(this.unsubscribeNotifier),
         tap((r) => {
-          this.mailRules = r.results
-        }),
-        delay(100)
+          this.mailRules.set(r.results)
+          this.loadingRules.set(false)
+          this.showRules.set(true)
+        })
       )
       .subscribe({
-        next: (r) => {
-          this.loadingRules = false
-          this.showRules = true
-        },
         error: (e) => {
+          this.loadingRules.set(false)
           this.toastService.showError($localize`Error retrieving mail rules`, e)
         },
       })
@@ -132,11 +135,13 @@ export class MailComponent
       if (params.get('oauth_success')) {
         const success = params.get('oauth_success') === '1'
         if (success) {
-          this.toastService.showInfo($localize`OAuth2 authentication success`)
+          this.toastService.showSuccess(
+            $localize`OAuth2 authentication success`
+          )
           this.oAuthAccountId = parseInt(params.get('account_id'))
-          if (this.mailAccounts.length > 0) {
+          if (this.mailAccounts().length > 0) {
             this.editMailAccount(
-              this.mailAccounts.find(
+              this.mailAccounts().find(
                 (account) => account.id === this.oAuthAccountId
               )
             )
@@ -159,21 +164,21 @@ export class MailComponent
       backdrop: 'static',
       size: 'xl',
     })
-    modal.componentInstance.dialogMode = account
-      ? EditDialogMode.EDIT
-      : EditDialogMode.CREATE
+    modal.componentInstance.dialogMode.set(
+      account ? EditDialogMode.EDIT : EditDialogMode.CREATE
+    )
     modal.componentInstance.object = account
     modal.componentInstance.succeeded
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe((newMailAccount) => {
-        this.toastService.showInfo(
+        this.toastService.showSuccess(
           $localize`Saved account "${newMailAccount.name}".`
         )
         this.mailAccountService.clearCache()
         this.mailAccountService
           .listAll(null, null, { full_perms: true })
           .subscribe((r) => {
-            this.mailAccounts = r.results
+            this.setMailAccounts(r.results)
           })
       })
     modal.componentInstance.failed
@@ -193,18 +198,18 @@ export class MailComponent
     modal.componentInstance.btnClass = 'btn-danger'
     modal.componentInstance.btnCaption = $localize`Proceed`
     modal.componentInstance.confirmClicked.subscribe(() => {
-      modal.componentInstance.buttonsEnabled = false
+      modal.componentInstance.buttonsEnabled.set(false)
       this.mailAccountService.delete(account).subscribe({
         next: () => {
           modal.close()
-          this.toastService.showInfo(
+          this.toastService.showSuccess(
             $localize`Deleted mail account "${account.name}"`
           )
           this.mailAccountService.clearCache()
           this.mailAccountService
             .listAll(null, null, { full_perms: true })
             .subscribe((r) => {
-              this.mailAccounts = r.results
+              this.setMailAccounts(r.results)
             })
         },
         error: (e) => {
@@ -238,18 +243,21 @@ export class MailComponent
       backdrop: 'static',
       size: 'xl',
     })
-    modal.componentInstance.dialogMode =
+    modal.componentInstance.dialogMode.set(
       rule && !forceCreate ? EditDialogMode.EDIT : EditDialogMode.CREATE
+    )
     modal.componentInstance.object = rule
     modal.componentInstance.succeeded
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe((newMailRule) => {
-        this.toastService.showInfo($localize`Saved rule "${newMailRule.name}".`)
+        this.toastService.showSuccess(
+          $localize`Saved rule "${newMailRule.name}".`
+        )
         this.mailRuleService.clearCache()
         this.mailRuleService
           .listAll(null, null, { full_perms: true })
           .subscribe((r) => {
-            this.mailRules = r.results
+            this.mailRules.set(r.results)
           })
       })
     modal.componentInstance.failed
@@ -269,7 +277,7 @@ export class MailComponent
   onMailRuleEnableToggled(rule: MailRule) {
     this.mailRuleService.patch(rule).subscribe({
       next: () => {
-        this.toastService.showInfo(
+        this.toastService.showSuccess(
           rule.enabled
             ? $localize`Rule "${rule.name}" enabled.`
             : $localize`Rule "${rule.name}" disabled.`
@@ -294,18 +302,18 @@ export class MailComponent
     modal.componentInstance.btnClass = 'btn-danger'
     modal.componentInstance.btnCaption = $localize`Proceed`
     modal.componentInstance.confirmClicked.subscribe(() => {
-      modal.componentInstance.buttonsEnabled = false
+      modal.componentInstance.buttonsEnabled.set(false)
       this.mailRuleService.delete(rule).subscribe({
         next: () => {
           modal.close()
-          this.toastService.showInfo(
+          this.toastService.showSuccess(
             $localize`Deleted mail rule "${rule.name}"`
           )
           this.mailRuleService.clearCache()
           this.mailRuleService
             .listAll(null, null, { full_perms: true })
             .subscribe((r) => {
-              this.mailRules = r.results
+              this.mailRules.set(r.results)
             })
         },
         error: (e) => {
@@ -327,14 +335,14 @@ export class MailComponent
     dialog.object = object
     modal.componentInstance.confirmClicked.subscribe(
       ({ permissions, merge }) => {
-        modal.componentInstance.buttonsEnabled = false
+        modal.componentInstance.buttonsEnabled.set(false)
         const service: AbstractPaperlessService<MailRule | MailAccount> =
           'account' in object ? this.mailRuleService : this.mailAccountService
         object.owner = permissions['owner']
         object['set_permissions'] = permissions['set_permissions']
         service.patch(object).subscribe({
           next: () => {
-            this.toastService.showInfo($localize`Permissions updated`)
+            this.toastService.showSuccess($localize`Permissions updated`)
             modal.close()
           },
           error: (e) => {
@@ -353,7 +361,7 @@ export class MailComponent
       backdrop: 'static',
       size: 'xl',
     })
-    modal.componentInstance.rule = rule
+    modal.componentInstance.rule.set(rule)
   }
 
   userCanEdit(obj: ObjectWithPermissions): boolean {

@@ -1,7 +1,6 @@
 from unittest.mock import Mock
 
 from django.contrib.auth.models import Group
-from django.contrib.auth.models import User
 from django.http import HttpRequest
 from django.test import TestCase
 from django.test import override_settings
@@ -9,17 +8,18 @@ from django.test import override_settings
 from documents.models import UiSettings
 from paperless.signals import handle_failed_login
 from paperless.signals import handle_social_account_updated
+from paperless_testing.factories import UserFactory
 
 
 class TestFailedLoginLogging(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
 
         self.creds = {
             "username": "john lennon",
         }
 
-    def test_unauthenticated(self):
+    def test_unauthenticated(self) -> None:
         """
         GIVEN:
             - Request with no authentication provided
@@ -39,7 +39,7 @@ class TestFailedLoginLogging(TestCase):
                 ],
             )
 
-    def test_none(self):
+    def test_none(self) -> None:
         """
         GIVEN:
             - Request with no IP possible
@@ -60,7 +60,7 @@ class TestFailedLoginLogging(TestCase):
                 ],
             )
 
-    def test_public(self):
+    def test_public(self) -> None:
         """
         GIVEN:
             - Request with publicly routeable IP
@@ -83,7 +83,7 @@ class TestFailedLoginLogging(TestCase):
                 ],
             )
 
-    def test_private(self):
+    def test_private(self) -> None:
         """
         GIVEN:
             - Request with private range IP
@@ -110,7 +110,7 @@ class TestFailedLoginLogging(TestCase):
 
 class TestSyncSocialLoginGroups(TestCase):
     @override_settings(SOCIAL_ACCOUNT_SYNC_GROUPS=True)
-    def test_sync_enabled(self):
+    def test_sync_enabled(self) -> None:
         """
         GIVEN:
             - Enabled group syncing, a user, and a social login
@@ -120,7 +120,7 @@ class TestSyncSocialLoginGroups(TestCase):
             - The user's groups are updated to match the social login's groups
         """
         group = Group.objects.create(name="group1")
-        user = User.objects.create_user(username="testuser")
+        user = UserFactory(username="testuser")
         sociallogin = Mock(
             user=user,
             account=Mock(
@@ -137,7 +137,7 @@ class TestSyncSocialLoginGroups(TestCase):
         self.assertEqual(list(user.groups.all()), [group])
 
     @override_settings(SOCIAL_ACCOUNT_SYNC_GROUPS=False)
-    def test_sync_disabled(self):
+    def test_sync_disabled(self) -> None:
         """
         GIVEN:
             - Disabled group syncing, a user, and a social login
@@ -147,7 +147,7 @@ class TestSyncSocialLoginGroups(TestCase):
             - The user's groups are not updated
         """
         Group.objects.create(name="group1")
-        user = User.objects.create_user(username="testuser")
+        user = UserFactory(username="testuser")
         sociallogin = Mock(
             user=user,
             account=Mock(
@@ -163,8 +163,49 @@ class TestSyncSocialLoginGroups(TestCase):
         )
         self.assertEqual(list(user.groups.all()), [])
 
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_GROUPS=True,
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP="admin-group",
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP="staff-group",
+    )
+    def test_no_sync_for_inactive_user(self) -> None:
+        """
+        GIVEN:
+            - Enabled group, superuser, and staff syncing
+            - A deactivated user with a matching social login
+        WHEN:
+            - The social login is updated via signal
+        THEN:
+            - Groups and roles are left untouched, since the login itself
+              would be rejected for a deactivated user anyway
+        """
+        Group.objects.create(name="admin-group")
+        user = UserFactory(
+            username="inactive_user",
+            is_active=False,
+            is_superuser=False,
+            is_staff=False,
+        )
+        sociallogin = Mock(
+            user=user,
+            account=Mock(
+                extra_data={
+                    "groups": ["admin-group", "staff-group"],
+                },
+            ),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertEqual(list(user.groups.all()), [])
+        self.assertFalse(user.is_superuser)
+        self.assertFalse(user.is_staff)
+
     @override_settings(SOCIAL_ACCOUNT_SYNC_GROUPS=True)
-    def test_no_groups(self):
+    def test_no_groups(self) -> None:
         """
         GIVEN:
             - Enabled group syncing, a user, and a social login with no groups
@@ -174,7 +215,7 @@ class TestSyncSocialLoginGroups(TestCase):
             - The user's groups are cleared to match the social login's groups
         """
         group = Group.objects.create(name="group1")
-        user = User.objects.create_user(username="testuser")
+        user = UserFactory(username="testuser")
         user.groups.add(group)
         user.save()
         sociallogin = Mock(
@@ -193,7 +234,7 @@ class TestSyncSocialLoginGroups(TestCase):
         self.assertEqual(list(user.groups.all()), [])
 
     @override_settings(SOCIAL_ACCOUNT_SYNC_GROUPS=True)
-    def test_userinfo_groups(self):
+    def test_userinfo_groups(self) -> None:
         """
         GIVEN:
             - Enabled group syncing, and `groups` nested under `userinfo`
@@ -203,7 +244,7 @@ class TestSyncSocialLoginGroups(TestCase):
             - The user's groups are updated using `userinfo.groups`
         """
         group = Group.objects.create(name="group1")
-        user = User.objects.create_user(username="testuser")
+        user = UserFactory(username="testuser")
         sociallogin = Mock(
             user=user,
             account=Mock(
@@ -224,7 +265,7 @@ class TestSyncSocialLoginGroups(TestCase):
         self.assertEqual(list(user.groups.all()), [group])
 
     @override_settings(SOCIAL_ACCOUNT_SYNC_GROUPS=True)
-    def test_id_token_groups_fallback(self):
+    def test_id_token_groups_fallback(self) -> None:
         """
         GIVEN:
             - Enabled group syncing, and `groups` only under `id_token`
@@ -234,7 +275,7 @@ class TestSyncSocialLoginGroups(TestCase):
             - The user's groups are updated using `id_token.groups`
         """
         group = Group.objects.create(name="group1")
-        user = User.objects.create_user(username="testuser")
+        user = UserFactory(username="testuser")
         sociallogin = Mock(
             user=user,
             account=Mock(
@@ -254,6 +295,341 @@ class TestSyncSocialLoginGroups(TestCase):
 
         self.assertEqual(list(user.groups.all()), [group])
 
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP="admin",
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP="admin",
+    )
+    def test_sync_superuser_claim_no_substring_match(self) -> None:
+        """
+        GIVEN:
+            - Configured superuser group sync
+            - Provider emits the groups claim as a bare string, and the user's
+              only group merely *contains* the configured name
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User is not promoted, since only an exact group match counts
+        """
+        user = UserFactory(username="testuser", is_superuser=False, is_staff=False)
+        sociallogin = Mock(
+            user=user,
+            account=Mock(
+                extra_data={
+                    "groups": "paperless-admins-readonly",
+                },
+            ),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertFalse(user.is_superuser)
+        self.assertFalse(user.is_staff)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP="admin-group",
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP=None,
+    )
+    def test_sync_superuser_enabled(self) -> None:
+        """
+        GIVEN:
+            - Configured superuser group sync, and user with that group
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User becomes superuser and staff
+        """
+        user = UserFactory(username="testuser_s_e", is_superuser=False, is_staff=False)
+        sociallogin = Mock(
+            user=user,
+            account=Mock(
+                extra_data={
+                    "groups": ["admin-group"],
+                },
+            ),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP="admin-group",
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP=None,
+    )
+    def test_sync_superuser_disabled(self) -> None:
+        """
+        GIVEN:
+            - Configured superuser group sync, and user without that group
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User loses superuser status but preserves staff status if they had it
+        """
+        user = UserFactory(username="testuser_s_d", is_superuser=True, is_staff=True)
+        sociallogin = Mock(
+            user=user,
+            account=Mock(
+                extra_data={
+                    "groups": ["other-group"],
+                },
+            ),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.is_staff)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP=None,
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP="staff-group",
+    )
+    def test_sync_staff_enabled(self) -> None:
+        """
+        GIVEN:
+            - Configured staff group sync, and user with that group
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User becomes staff
+        """
+        user = UserFactory(username="testuser_st_e", is_superuser=False, is_staff=False)
+        sociallogin = Mock(
+            user=user,
+            account=Mock(
+                extra_data={
+                    "groups": ["staff-group"],
+                },
+            ),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertTrue(user.is_staff)
+        self.assertFalse(user.is_superuser)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP=None,
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP="staff-group",
+    )
+    def test_sync_staff_disabled(self) -> None:
+        """
+        GIVEN:
+            - Configured staff group sync, and user without that group
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User loses staff status
+        """
+        user = UserFactory(username="testuser_st_d", is_superuser=False, is_staff=True)
+        sociallogin = Mock(
+            user=user,
+            account=Mock(
+                extra_data={
+                    "groups": ["other-group"],
+                },
+            ),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertFalse(user.is_staff)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP="admin-group",
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP="staff-group",
+    )
+    def test_sync_both_groups(self) -> None:
+        """
+        GIVEN:
+            - Configured both superuser and staff group sync
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - Roles are correctly assigned/revoked according to groups
+        """
+        # Case 1: has both
+        user = UserFactory(username="testuser_b_1", is_superuser=False, is_staff=False)
+        sociallogin = Mock(
+            user=user,
+            account=Mock(extra_data={"groups": ["admin-group", "staff-group"]}),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+
+        # Case 2: has only staff
+        user2 = UserFactory(username="testuser_b_2", is_superuser=True, is_staff=True)
+        sociallogin2 = Mock(
+            user=user2,
+            account=Mock(extra_data={"groups": ["staff-group"]}),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin2,
+        )
+        user2.refresh_from_db()
+        self.assertFalse(user2.is_superuser)
+        self.assertTrue(user2.is_staff)
+
+        # Case 3: has neither
+        user3 = UserFactory(username="testuser_b_3", is_superuser=True, is_staff=True)
+        sociallogin3 = Mock(
+            user=user3,
+            account=Mock(extra_data={"groups": ["other-group"]}),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin3,
+        )
+        user3.refresh_from_db()
+        self.assertFalse(user3.is_superuser)
+        self.assertFalse(user3.is_staff)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP=None,
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP=None,
+    )
+    def test_no_sync_when_not_configured(self) -> None:
+        """
+        GIVEN:
+            - No sync settings configured
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - Existing roles are not modified
+        """
+        user = UserFactory(username="testuser_n_s", is_superuser=True, is_staff=True)
+        sociallogin = Mock(
+            user=user,
+            account=Mock(extra_data={"groups": ["admin-group", "staff-group"]}),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP="admin-group",
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP=None,
+    )
+    def test_sync_superuser_demotes_local_user_without_group(self) -> None:
+        """
+        GIVEN:
+            - Configured superuser group sync
+            - User with a usable (local) password, but without the group
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User's superuser status is demoted, matching the group claim exactly
+        """
+        user = UserFactory(
+            username="local_admin",
+            password="password123",
+            is_superuser=True,
+            is_staff=True,
+        )
+        sociallogin = Mock(
+            user=user,
+            account=Mock(extra_data={"groups": ["other-group"]}),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertFalse(user.is_superuser)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP="admin-group",
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP=None,
+    )
+    def test_sync_superuser_demotes_last_admin(self) -> None:
+        """
+        GIVEN:
+            - Configured superuser group sync
+            - User without the group, and no other active superuser exists
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User's superuser status is demoted, even though they are the last admin
+        """
+        user = UserFactory(username="last_admin", is_superuser=True, is_staff=True)
+        user.set_unusable_password()
+        user.save()
+
+        sociallogin = Mock(
+            user=user,
+            account=Mock(extra_data={"groups": ["other-group"]}),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertFalse(user.is_superuser)
+
+    @override_settings(
+        SOCIAL_ACCOUNT_SYNC_SUPERUSER_GROUP=None,
+        SOCIAL_ACCOUNT_SYNC_STAFF_GROUP="staff-group",
+    )
+    def test_sync_staff_demotes_local_user_without_group(self) -> None:
+        """
+        GIVEN:
+            - Configured staff group sync
+            - User with a usable (local) password, but without the group
+        WHEN:
+            - Social login updated via signal
+        THEN:
+            - User's staff status is demoted, matching the group claim exactly
+        """
+        user = UserFactory(
+            username="local_staff",
+            password="password123",
+            is_superuser=False,
+            is_staff=True,
+        )
+        sociallogin = Mock(
+            user=user,
+            account=Mock(extra_data={"groups": ["other-group"]}),
+        )
+        handle_social_account_updated(
+            sender=None,
+            request=HttpRequest(),
+            sociallogin=sociallogin,
+        )
+        user.refresh_from_db()
+        self.assertFalse(user.is_staff)
+
 
 class TestUserGroupDeletionCleanup(TestCase):
     """
@@ -261,7 +637,7 @@ class TestUserGroupDeletionCleanup(TestCase):
     from ui_settings
     """
 
-    def test_user_group_deletion_cleanup(self):
+    def test_user_group_deletion_cleanup(self) -> None:
         """
         GIVEN:
             - Existing user
@@ -272,8 +648,8 @@ class TestUserGroupDeletionCleanup(TestCase):
         THEN:
             - References in ui_settings are cleaned up
         """
-        user = User.objects.create_user(username="testuser")
-        user2 = User.objects.create_user(username="testuser2")
+        user = UserFactory(username="testuser")
+        user2 = UserFactory(username="testuser2")
         group = Group.objects.create(name="testgroup")
 
         ui_settings = UiSettings.objects.create(
@@ -302,7 +678,7 @@ class TestUserGroupDeletionCleanup(TestCase):
         self.assertEqual(permissions.get("default_view_groups"), [])
         self.assertEqual(permissions.get("default_change_groups"), [])
 
-    def test_user_group_deletion_error_handling(self):
+    def test_user_group_deletion_error_handling(self) -> None:
         """
         GIVEN:
             - Existing user and group
@@ -311,8 +687,8 @@ class TestUserGroupDeletionCleanup(TestCase):
         THEN:
             - Error is logged and the system remains stable
         """
-        user = User.objects.create_user(username="testuser")
-        user2 = User.objects.create_user(username="testuser2")
+        user = UserFactory(username="testuser")
+        user2 = UserFactory(username="testuser2")
         user2_id = user2.id
         Group.objects.create(name="testgroup")
 

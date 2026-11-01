@@ -1,0 +1,339 @@
+import { ComponentFixture, TestBed } from '@angular/core/testing'
+import { NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap'
+import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
+import { SuggestionSource } from 'src/app/data/ui-settings'
+import { SuggestionsDropdownComponent } from './suggestions-dropdown.component'
+
+describe('SuggestionsDropdownComponent', () => {
+  let component: SuggestionsDropdownComponent
+  let fixture: ComponentFixture<SuggestionsDropdownComponent>
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      imports: [
+        NgbDropdownModule,
+        NgxBootstrapIconsModule.pick(allIcons),
+        SuggestionsDropdownComponent,
+      ],
+      providers: [],
+    })
+    fixture = TestBed.createComponent(SuggestionsDropdownComponent)
+    component = fixture.componentInstance
+    fixture.detectChanges()
+  })
+
+  it('should exclude suggested storage path names from totalSuggestions', () => {
+    fixture.componentRef.setInput('suggestions', {
+      suggested_correspondents: ['John Doe'],
+      suggested_tags: ['Tag1', 'Tag2'],
+      suggested_document_types: ['Type1'],
+      suggested_storage_paths: ['Finance/Invoices'],
+    })
+    expect(component.totalSuggestions).toBe(4)
+  })
+
+  it('should count suggestions when a category is absent from the response', () => {
+    fixture.componentRef.setInput('suggestions', {
+      suggested_tags: ['Tag1'],
+    })
+    expect(component.totalSuggestions).toBe(1)
+  })
+
+  it('should count reused values the document does not have yet', () => {
+    fixture.componentRef.setInput('suggestions', {
+      tags: [1, 2, 3],
+      correspondents: [10],
+      document_types: [20],
+      suggested_tags: ['NewTag'],
+    })
+    fixture.componentRef.setInput('appliedTags', [2])
+    fixture.componentRef.setInput('appliedDocumentType', 20)
+
+    // tags 1 and 3 are not applied yet, correspondent 10 is not set, tag 2 and
+    // document type 20 already are.
+    expect(component.reusableSuggestions).toBe(3)
+    expect(component.novelSuggestions).toBe(1)
+    expect(component.totalSuggestions).toBe(4)
+  })
+
+  it('should not count reused values that are already applied', () => {
+    fixture.componentRef.setInput('suggestions', {
+      tags: [1],
+      correspondents: [10],
+      document_types: [20],
+    })
+    fixture.componentRef.setInput('appliedTags', [1])
+    fixture.componentRef.setInput('appliedCorrespondent', 10)
+    fixture.componentRef.setInput('appliedDocumentType', 20)
+
+    expect(component.totalSuggestions).toBe(0)
+  })
+
+  it('should point at the fields when suggestions are all reused', () => {
+    // The dropdown lists only values to create, so a response made entirely of
+    // reused existing objects used to render as "No novel suggestions".
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.componentRef.setInput('suggestions', {
+      tags: [1, 2],
+      suggested_tags: [],
+      suggested_correspondents: [],
+      suggested_document_types: [],
+    })
+    fixture.detectChanges()
+    component.clickSuggest()
+    fixture.detectChanges()
+
+    expect(fixture.nativeElement.textContent).toContain(
+      '2 suggestions available below'
+    )
+    expect(fixture.nativeElement.textContent).not.toContain(
+      'No novel suggestions'
+    )
+  })
+
+  it('should account for reused values alongside values to create', () => {
+    // The badge counts both, but only the novel names are listed here, so the
+    // dropdown has to say where the rest of the count came from.
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.componentRef.setInput('suggestions', {
+      tags: [6, 3],
+      suggested_tags: ['Arbitration', 'New York'],
+      suggested_correspondents: [],
+      suggested_document_types: [],
+    })
+    fixture.detectChanges()
+    component.clickSuggest()
+    fixture.detectChanges()
+
+    expect(component.totalSuggestions).toBe(4)
+    expect(fixture.nativeElement.textContent).toContain('Arbitration')
+    expect(fixture.nativeElement.textContent).toContain(
+      '2 suggestions available below'
+    )
+  })
+
+  it('should count classic (non-AI) suggestions, which are ids only', () => {
+    // /api/documents/{id}/suggestions/ returns only id arrays and no
+    // suggested_* keys at all, so every one of its suggestions is a reused
+    // existing object - including storage paths.
+    fixture.componentRef.setInput('suggestions', {
+      correspondents: [4],
+      tags: [6, 3],
+      document_types: [2],
+      storage_paths: [7],
+      dates: ['2005-01-01'],
+    })
+
+    expect(component.novelSuggestions).toBe(0)
+    expect(component.totalSuggestions).toBe(6)
+
+    fixture.componentRef.setInput('appliedStoragePath', 7)
+    expect(component.totalSuggestions).toBe(5)
+  })
+
+  it('should count title and dates as field suggestions without calling them existing values', () => {
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.componentRef.setInput('fetchedSources', [SuggestionSource.ML])
+    fixture.componentRef.setInput('suggestions', {
+      title: 'Suggested title',
+      dates: ['2026-01-04', '2026-02-01', '2026-03-01'],
+      correspondents: [1, 2, 3, 4],
+      document_types: [1, 2, 3, 4],
+      tags: [1, 2, 3, 4, 5, 6, 7, 8],
+    })
+    fixture.detectChanges()
+    component.clickSuggest()
+    fixture.detectChanges()
+
+    expect(component.reusableSuggestions).toBe(16)
+    expect(component.fieldSuggestions).toBe(20)
+    expect(component.totalSuggestions).toBe(20)
+    expect(fixture.nativeElement.textContent).toContain(
+      '20 suggestions available below'
+    )
+    expect(fixture.nativeElement.textContent).not.toContain('existing value')
+  })
+
+  it('should not count title or date suggestions matching the current values', () => {
+    fixture.componentRef.setInput('suggestions', {
+      title: 'Current title',
+      dates: ['2026-01-04', '2026-02-01'],
+    })
+    expect(component.fieldSuggestions).toBe(3)
+
+    fixture.componentRef.setInput('appliedTitle', 'Current title')
+    fixture.componentRef.setInput('appliedCreated', '2026-01-04')
+    expect(component.fieldSuggestions).toBe(1)
+    expect(component.totalSuggestions).toBe(1)
+  })
+
+  it('should show when a completed request returned no suggestions', () => {
+    fixture.componentRef.setInput('suggestions', {
+      correspondents: [],
+      tags: [],
+      document_types: [],
+      storage_paths: [],
+      dates: [],
+    })
+    fixture.detectChanges()
+
+    expect(component.noSuggestions).toBeTruthy()
+    expect(fixture.nativeElement.textContent).toContain('No suggestions')
+  })
+
+  it('should wait for all pending responses before showing the empty state', () => {
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.componentRef.setInput('source', SuggestionSource.Both)
+    fixture.componentRef.setInput('fetchedSources', [SuggestionSource.ML])
+    fixture.componentRef.setInput('suggestions', { tags: [] })
+    fixture.componentRef.setInput('loading', true)
+    fixture.detectChanges()
+
+    expect(component.noSuggestions).toBeFalsy()
+    expect(fixture.nativeElement.textContent).not.toContain('No suggestions')
+    expect(
+      fixture.nativeElement.querySelector('[role="status"]')
+    ).not.toBeNull()
+
+    fixture.componentRef.setInput('loading', false)
+    fixture.detectChanges()
+
+    expect(component.noSuggestions).toBeTruthy()
+    expect(fixture.nativeElement.textContent).toContain('No suggestions')
+    expect(fixture.nativeElement.querySelector('[role="status"]')).toBeNull()
+  })
+
+  it('should not show the empty state before a request or with suggestions', () => {
+    expect(component.noSuggestions).toBeFalsy()
+
+    fixture.componentRef.setInput('suggestions', {
+      correspondents: [],
+      tags: [42],
+      document_types: [],
+      storage_paths: [],
+      dates: [],
+    })
+
+    expect(component.noSuggestions).toBeFalsy()
+  })
+
+  it('should emit getSuggestions when clickSuggest is called and suggestions are null', () => {
+    jest.spyOn(component.getSuggestions, 'emit')
+    fixture.componentRef.setInput('suggestions', null)
+    component.clickSuggest()
+    expect(component.getSuggestions.emit).toHaveBeenCalled()
+  })
+
+  it('should not emit getSuggestions when disabled', () => {
+    jest.spyOn(component.getSuggestions, 'emit')
+    fixture.componentRef.setInput('disabled', true)
+    fixture.componentRef.setInput('suggestions', null)
+    fixture.detectChanges()
+
+    component.clickSuggest()
+
+    expect(component.getSuggestions.emit).not.toHaveBeenCalled()
+    expect(fixture.nativeElement.querySelector('button').disabled).toBeTruthy()
+  })
+
+  it('should toggle dropdown when clickSuggest is called and suggestions are not null', () => {
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.componentRef.setInput('fetchedSources', [SuggestionSource.ML])
+    fixture.detectChanges()
+    fixture.componentRef.setInput('suggestions', {
+      suggested_correspondents: [],
+      suggested_tags: [],
+      suggested_document_types: [],
+    })
+    fixture.detectChanges()
+    component.clickSuggest()
+    expect(component.dropdown.isOpen()).toBeTruthy()
+    expect(fixture.nativeElement.textContent).toContain('No novel suggestions')
+  })
+
+  it('should open ML date suggestions with AI disabled', () => {
+    const getSuggestions = jest.spyOn(component.getSuggestions, 'emit')
+    fixture.componentRef.setInput('aiEnabled', false)
+    fixture.componentRef.setInput('fetchedSources', [SuggestionSource.ML])
+    fixture.componentRef.setInput('suggestions', {
+      dates: ['2026-01-04', '2026-02-01'],
+    })
+    fixture.componentRef.setInput('appliedCreated', '2026-01-04')
+    fixture.detectChanges()
+
+    const button = fixture.nativeElement.querySelector('button')
+    expect(button.disabled).toBeFalsy()
+    expect(button.querySelector('.badge').textContent.trim()).toBe('1')
+
+    button.click()
+    fixture.detectChanges()
+
+    expect(component.dropdown.isOpen()).toBeTruthy()
+    expect(fixture.nativeElement.textContent).toContain(
+      '1 suggestion available below'
+    )
+    expect(getSuggestions).not.toHaveBeenCalled()
+    expect(
+      fixture.nativeElement.querySelector('button[title="Suggestion options"]')
+    ).toBeNull()
+
+    button.click()
+    fixture.detectChanges()
+    expect(component.dropdown.isOpen()).toBeFalsy()
+  })
+
+  it('should fetch unfetched sources and show existing suggestions', () => {
+    jest.spyOn(component.getSuggestions, 'emit')
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.componentRef.setInput('source', SuggestionSource.Both)
+    fixture.componentRef.setInput('fetchedSources', [SuggestionSource.ML])
+    fixture.componentRef.setInput('suggestions', { tags: [1] })
+    fixture.detectChanges()
+    component.clickSuggest()
+    expect(component.getSuggestions.emit).toHaveBeenCalledWith(
+      SuggestionSource.Both
+    )
+    expect(component.dropdown.isOpen()).toBeTruthy()
+  })
+
+  it('should only show source options when AI is enabled', () => {
+    expect(
+      fixture.nativeElement.querySelector('#suggestionSourceML')
+    ).toBeNull()
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.detectChanges()
+    fixture.nativeElement
+      .querySelector('button[title="Suggestion options"]')
+      .click()
+    fixture.detectChanges()
+    expect(
+      fixture.nativeElement.querySelector('#suggestionSourceML')
+    ).not.toBeNull()
+  })
+
+  it('should emit source changes and never allow no source', () => {
+    const emitSpy = jest.spyOn(component.sourceChange, 'emit')
+    component.setSources(true, true)
+    expect(emitSpy).toHaveBeenCalledWith(SuggestionSource.Both)
+    component.setSources(true, false)
+    expect(emitSpy).toHaveBeenCalledWith(SuggestionSource.ML)
+    component.setSources(false, true)
+    expect(emitSpy).toHaveBeenCalledWith(SuggestionSource.AI)
+
+    emitSpy.mockClear()
+    component.setSources(false, false)
+    expect(emitSpy).not.toHaveBeenCalled()
+  })
+
+  it('should indicate a non-default source', () => {
+    fixture.componentRef.setInput('aiEnabled', true)
+    fixture.componentRef.setInput('source', SuggestionSource.AI)
+    fixture.componentRef.setInput('defaultSource', SuggestionSource.AI)
+    fixture.detectChanges()
+    expect(fixture.nativeElement.textContent).not.toContain('Not using default')
+
+    fixture.componentRef.setInput('source', SuggestionSource.Both)
+    fixture.detectChanges()
+    expect(fixture.nativeElement.textContent).toContain('Not using default')
+  })
+})

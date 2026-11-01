@@ -2,18 +2,16 @@ import datetime
 from datetime import timedelta
 from unittest import mock
 
+import pytest
+import time_machine
 from dateutil.relativedelta import relativedelta
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission
-from django.contrib.auth.models import User
 from django.test import override_settings
 from django.utils import timezone
-from guardian.shortcuts import assign_perm
 from rest_framework import status
 from rest_framework.test import APITestCase
-from whoosh.writing import AsyncWriter
 
-from documents import index
 from documents.bulk_edit import set_permissions
 from documents.models import Correspondent
 from documents.models import CustomField
@@ -25,19 +23,32 @@ from documents.models import SavedView
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.models import Workflow
-from documents.tests.utils import DirectoriesMixin
+from documents.search import get_backend
+from documents.search import reset_backend
 from paperless_mail.models import MailAccount
 from paperless_mail.models import MailRule
+from paperless_testing.dirs import DirectoriesMixin
+from paperless_testing.factories import DocumentFactory
+from paperless_testing.factories import UserFactory
+from paperless_testing.permissions import grant_global
+from paperless_testing.permissions import grant_object
+
+pytestmark = pytest.mark.search
 
 
 class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
+        reset_backend()
 
-        self.user = User.objects.create_superuser(username="temp_admin")
+        self.user = UserFactory(username="temp_admin", superuser=True)
         self.client.force_authenticate(user=self.user)
 
-    def test_search(self):
+    def tearDown(self) -> None:
+        reset_backend()
+        super().tearDown()
+
+    def test_search(self) -> None:
         d1 = Document.objects.create(
             title="invoice",
             content="the thing i bought at a shop and paid with bank account",
@@ -57,39 +68,317 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             checksum="C",
             original_filename="someepdf.pdf",
         )
-        with AsyncWriter(index.open_index()) as writer:
-            # Note to future self: there is a reason we dont use a model signal handler to update the index: some operations edit many documents at once
-            # (retagger, renamer) and we don't want to open a writer for each of these, but rather perform the entire operation with one writer.
-            # That's why we can't open the writer in a model on_save handler or something.
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
+
         response = self.client.get("/api/documents/?query=bank")
         results = response.data["results"]
         self.assertEqual(response.data["count"], 3)
         self.assertEqual(len(results), 3)
-        self.assertCountEqual(response.data["all"], [d1.id, d2.id, d3.id])
 
         response = self.client.get("/api/documents/?query=september")
         results = response.data["results"]
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(len(results), 1)
-        self.assertCountEqual(response.data["all"], [d3.id])
         self.assertEqual(results[0]["original_file_name"], "someepdf.pdf")
 
         response = self.client.get("/api/documents/?query=statement")
         results = response.data["results"]
         self.assertEqual(response.data["count"], 2)
         self.assertEqual(len(results), 2)
-        self.assertCountEqual(response.data["all"], [d2.id, d3.id])
 
         response = self.client.get("/api/documents/?query=sfegdfg")
         results = response.data["results"]
         self.assertEqual(response.data["count"], 0)
         self.assertEqual(len(results), 0)
-        self.assertCountEqual(response.data["all"], [])
 
-    def test_search_custom_field_ordering(self):
+    def test_search_after_restore_from_trash(self) -> None:
+        """
+        GIVEN:
+            - Indexed document that was moved to the trash
+        WHEN:
+            - The document is restored from the trash
+        THEN:
+            - The document is searchable again without a reindex
+        """
+        doc = Document.objects.create(
+            title="invoice",
+            content="the thing i bought at a shop and paid with bank account",
+            checksum="A",
+            pk=1,
+        )
+        get_backend().add_or_update(doc)
+
+        self.assertEqual(self.client.get("/api/documents/?query=shop").data["count"], 1)
+
+        self.client.delete(f"/api/documents/{doc.pk}/")
+        self.assertEqual(self.client.get("/api/documents/?query=shop").data["count"], 0)
+
+        response = self.client.post(
+            "/api/trash/",
+            {"action": "restore", "documents": [doc.pk]},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(self.client.get("/api/documents/?query=shop").data["count"], 1)
+
+    def test_simple_text_search(self) -> None:
+        tagged = Tag.objects.create(name="invoice")
+        matching_doc = Document.objects.create(
+            title="Quarterly summary",
+            content="Monthly bank report",
+            checksum="T1",
+            pk=11,
+        )
+        matching_doc.tags.add(tagged)
+
+        metadata_only_doc = Document.objects.create(
+            title="Completely unrelated",
+            content="No matching terms here",
+            checksum="T2",
+            pk=12,
+        )
+        metadata_only_doc.tags.add(tagged)
+
+        backend = get_backend()
+        backend.add_or_update(matching_doc)
+        backend.add_or_update(metadata_only_doc)
+
+        response = self.client.get("/api/documents/?text=monthly")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], matching_doc.id)
+
+        response = self.client.get("/api/documents/?text=tag:invoice")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+
+    def test_simple_text_search_matches_substrings(self) -> None:
+        matching_doc = Document.objects.create(
+            title="Quarterly summary",
+            content="Password reset instructions",
+            checksum="T5",
+            pk=15,
+        )
+
+        backend = get_backend()
+        backend.add_or_update(matching_doc)
+
+        response = self.client.get("/api/documents/?text=pass")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], matching_doc.id)
+
+        response = self.client.get("/api/documents/?text=sswo")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], matching_doc.id)
+
+        response = self.client.get("/api/documents/?text=sswo re")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], matching_doc.id)
+
+    def test_simple_text_search_does_not_match_on_partial_term_overlap(self) -> None:
+        non_matching_doc = Document.objects.create(
+            title="Adobe Acrobat PDF Files",
+            content="Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+            checksum="T7",
+            pk=17,
+        )
+
+        backend = get_backend()
+        backend.add_or_update(non_matching_doc)
+
+        response = self.client.get("/api/documents/?text=raptor")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+
+    def test_simple_title_search(self) -> None:
+        title_match = Document.objects.create(
+            title="Quarterly summary",
+            content="No matching content here",
+            checksum="T3",
+            pk=13,
+        )
+        content_only = Document.objects.create(
+            title="Completely unrelated",
+            content="Quarterly summary appears only in content",
+            checksum="T4",
+            pk=14,
+        )
+
+        backend = get_backend()
+        backend.add_or_update(title_match)
+        backend.add_or_update(content_only)
+
+        response = self.client.get("/api/documents/?title_search=quarterly")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], title_match.id)
+
+    def test_simple_title_search_matches_substrings(self) -> None:
+        title_match = Document.objects.create(
+            title="Password handbook",
+            content="No matching content here",
+            checksum="T6",
+            pk=16,
+        )
+
+        backend = get_backend()
+        backend.add_or_update(title_match)
+
+        response = self.client.get("/api/documents/?title_search=pass")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], title_match.id)
+
+        response = self.client.get("/api/documents/?title_search=sswo")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], title_match.id)
+
+        response = self.client.get("/api/documents/?title_search=sswo hand")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], title_match.id)
+
+    def test_simple_search_combined_with_query_filter(self) -> None:
+        """
+        GIVEN:
+            - A document with the term in its title, created this year
+            - A document with the term only in its content, created this year
+            - A document with the term in its title, created years ago
+        WHEN:
+            - A title or text search is combined with a relative created
+              date query, as the filter editor sends it
+        THEN:
+            - The simple search keeps its own field scope and the query only
+              narrows the results (issue #14436)
+        """
+        this_year = timezone.localdate().replace(month=1, day=1)
+        title_match = Document.objects.create(
+            title="foo report",
+            content="nothing relevant",
+            checksum="F1",
+            created=this_year,
+            pk=21,
+        )
+        content_match = Document.objects.create(
+            title="something else",
+            content="foo appears here",
+            checksum="F2",
+            created=this_year,
+            pk=22,
+        )
+        old_title_match = Document.objects.create(
+            title="foo archive",
+            content="nothing relevant",
+            checksum="F3",
+            created=datetime.date(2001, 1, 1),
+            pk=23,
+        )
+        backend = get_backend()
+        for doc in (title_match, content_match, old_title_match):
+            backend.add_or_update(doc)
+
+        query = "created:[-1 year to now]"
+        response = self.client.get(
+            "/api/documents/",
+            {"title_search": "foo", "query": query},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [r["id"] for r in response.data["results"]],
+            [title_match.id],
+        )
+
+        response = self.client.get(
+            "/api/documents/",
+            {"text": "foo", "query": query},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(
+            [r["id"] for r in response.data["results"]],
+            [title_match.id, content_match.id],
+        )
+
+    def test_search_rejects_multiple_search_modes(self) -> None:
+        response = self.client.get("/api/documents/?text=bank&title_search=bank")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["detail"],
+            "Specify only one of text, title_search, query, or more_like_id.",
+        )
+
+    def test_search_returns_all_for_api_version_9(self) -> None:
+        d1 = Document.objects.create(
+            title="invoice",
+            content="bank payment",
+            checksum="A",
+            pk=1,
+        )
+        d2 = Document.objects.create(
+            title="bank statement",
+            content="bank transfer",
+            checksum="B",
+            pk=2,
+        )
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+
+        response = self.client.get(
+            "/api/documents/?query=bank",
+            headers={"Accept": "application/json; version=9"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("all", response.data)
+        self.assertCountEqual(response.data["all"], [d1.id, d2.id])
+
+    def test_search_with_include_selection_data(self) -> None:
+        correspondent = Correspondent.objects.create(name="c1")
+        doc_type = DocumentType.objects.create(name="dt1")
+        storage_path = StoragePath.objects.create(name="sp1")
+        tag = Tag.objects.create(name="tag")
+
+        matching_doc = Document.objects.create(
+            title="bank statement",
+            content="bank content",
+            checksum="A",
+            correspondent=correspondent,
+            document_type=doc_type,
+            storage_path=storage_path,
+        )
+        matching_doc.tags.add(tag)
+
+        get_backend().add_or_update(matching_doc)
+
+        response = self.client.get(
+            "/api/documents/?query=bank&include_selection_data=true",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("selection_data", response.data)
+
+        selected_correspondent = next(
+            item
+            for item in response.data["selection_data"]["selected_correspondents"]
+            if item["id"] == correspondent.id
+        )
+        selected_tag = next(
+            item
+            for item in response.data["selection_data"]["selected_tags"]
+            if item["id"] == tag.id
+        )
+
+        self.assertEqual(selected_correspondent["document_count"], 1)
+        self.assertEqual(selected_tag["document_count"], 1)
+
+    def test_search_custom_field_ordering(self) -> None:
         custom_field = CustomField.objects.create(
             name="Sortable field",
             data_type=CustomField.FieldDataType.INT,
@@ -125,10 +414,10 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             value_int=20,
         )
 
-        with AsyncWriter(index.open_index()) as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get(
             f"/api/documents/?query=match&ordering=custom_field_{custom_field.pk}",
@@ -148,16 +437,16 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             [d1.id, d3.id, d2.id],
         )
 
-    def test_search_multi_page(self):
-        with AsyncWriter(index.open_index()) as writer:
-            for i in range(55):
-                doc = Document.objects.create(
-                    checksum=str(i),
-                    pk=i + 1,
-                    title=f"Document {i + 1}",
-                    content="content",
-                )
-                index.update_document(writer, doc)
+    def test_search_multi_page(self) -> None:
+        backend = get_backend()
+        for i in range(55):
+            doc = Document.objects.create(
+                checksum=str(i),
+                pk=i + 1,
+                title=f"Document {i + 1}",
+                content="content",
+            )
+            backend.add_or_update(doc)
 
         # This is here so that we test that no document gets returned twice (might happen if the paging is not working)
         seen_ids = []
@@ -183,16 +472,16 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             self.assertNotIn(result["id"], seen_ids)
             seen_ids.append(result["id"])
 
-    def test_search_invalid_page(self):
-        with AsyncWriter(index.open_index()) as writer:
-            for i in range(15):
-                doc = Document.objects.create(
-                    checksum=str(i),
-                    pk=i + 1,
-                    title=f"Document {i + 1}",
-                    content="content",
-                )
-                index.update_document(writer, doc)
+    def test_search_invalid_page(self) -> None:
+        backend = get_backend()
+        for i in range(15):
+            doc = Document.objects.create(
+                checksum=str(i),
+                pk=i + 1,
+                title=f"Document {i + 1}",
+                content="content",
+            )
+            backend.add_or_update(doc)
 
         response = self.client.get("/api/documents/?query=content&page=0&page_size=10")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -202,7 +491,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
     @override_settings(
         TIME_ZONE="UTC",
     )
-    def test_search_added_in_last_week(self):
+    def test_search_added_in_last_week(self) -> None:
         """
         GIVEN:
             - Three documents added right now
@@ -230,31 +519,30 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             pk=3,
             checksum="C",
         )
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/documents/?query=added:[-1 week to now]")
         results = response.data["results"]
         # Expect 3 documents returned
         self.assertEqual(len(results), 3)
 
-        for idx, subset in enumerate(
-            [
-                {"id": 1, "title": "invoice"},
-                {"id": 2, "title": "bank statement 1"},
-                {"id": 3, "title": "bank statement 3"},
-            ],
-        ):
-            result = results[idx]
-            # Assert subset in results
-            self.assertDictEqual(result, {**result, **subset})
+        result_map = {r["id"]: r for r in results}
+        self.assertEqual(set(result_map.keys()), {1, 2, 3})
+        for subset in [
+            {"id": 1, "title": "invoice"},
+            {"id": 2, "title": "bank statement 1"},
+            {"id": 3, "title": "bank statement 3"},
+        ]:
+            r = result_map[subset["id"]]
+            self.assertDictEqual(r, {**r, **subset})
 
     @override_settings(
         TIME_ZONE="America/Chicago",
     )
-    def test_search_added_in_last_week_with_timezone_behind(self):
+    def test_search_added_in_last_week_with_timezone_behind(self) -> None:
         """
         GIVEN:
             - Two documents added right now
@@ -285,10 +573,10 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             # 7 days, 1 hour and 1 minute ago
             added=timezone.now() - timedelta(days=7, hours=1, minutes=1),
         )
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/documents/?query=added:[-1 week to now]")
         results = response.data["results"]
@@ -296,17 +584,19 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         # Expect 2 documents returned
         self.assertEqual(len(results), 2)
 
-        for idx, subset in enumerate(
-            [{"id": 1, "title": "invoice"}, {"id": 2, "title": "bank statement 1"}],
-        ):
-            result = results[idx]
-            # Assert subset in results
-            self.assertDictEqual(result, {**result, **subset})
+        result_map = {r["id"]: r for r in results}
+        self.assertEqual(set(result_map.keys()), {1, 2})
+        for subset in [
+            {"id": 1, "title": "invoice"},
+            {"id": 2, "title": "bank statement 1"},
+        ]:
+            r = result_map[subset["id"]]
+            self.assertDictEqual(r, {**r, **subset})
 
     @override_settings(
         TIME_ZONE="Europe/Sofia",
     )
-    def test_search_added_in_last_week_with_timezone_ahead(self):
+    def test_search_added_in_last_week_with_timezone_ahead(self) -> None:
         """
         GIVEN:
             - Two documents added right now
@@ -337,10 +627,10 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             # 7 days, 1 hour and 1 minute ago
             added=timezone.now() - timedelta(days=7, hours=1, minutes=1),
         )
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/documents/?query=added:[-1 week to now]")
         results = response.data["results"]
@@ -348,14 +638,16 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         # Expect 2 documents returned
         self.assertEqual(len(results), 2)
 
-        for idx, subset in enumerate(
-            [{"id": 1, "title": "invoice"}, {"id": 2, "title": "bank statement 1"}],
-        ):
-            result = results[idx]
-            # Assert subset in results
-            self.assertDictEqual(result, {**result, **subset})
+        result_map = {r["id"]: r for r in results}
+        self.assertEqual(set(result_map.keys()), {1, 2})
+        for subset in [
+            {"id": 1, "title": "invoice"},
+            {"id": 2, "title": "bank statement 1"},
+        ]:
+            r = result_map[subset["id"]]
+            self.assertDictEqual(r, {**r, **subset})
 
-    def test_search_added_in_last_month(self):
+    def test_search_added_in_last_month(self) -> None:
         """
         GIVEN:
             - One document added right now
@@ -389,10 +681,10 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             added=timezone.now() - timedelta(days=7, hours=1, minutes=1),
         )
 
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/documents/?query=added:[-1 month to now]")
         results = response.data["results"]
@@ -400,17 +692,19 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         # Expect 2 documents returned
         self.assertEqual(len(results), 2)
 
-        for idx, subset in enumerate(
-            [{"id": 1, "title": "invoice"}, {"id": 3, "title": "bank statement 3"}],
-        ):
-            result = results[idx]
-            # Assert subset in results
-            self.assertDictEqual(result, {**result, **subset})
+        result_map = {r["id"]: r for r in results}
+        self.assertEqual(set(result_map.keys()), {1, 3})
+        for subset in [
+            {"id": 1, "title": "invoice"},
+            {"id": 3, "title": "bank statement 3"},
+        ]:
+            r = result_map[subset["id"]]
+            self.assertDictEqual(r, {**r, **subset})
 
     @override_settings(
         TIME_ZONE="America/Denver",
     )
-    def test_search_added_in_last_month_timezone_behind(self):
+    def test_search_added_in_last_month_timezone_behind(self) -> None:
         """
         GIVEN:
             - One document added right now
@@ -445,10 +739,10 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             added=timezone.now() - timedelta(days=7, hours=1, minutes=1),
         )
 
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/documents/?query=added:[-1 month to now]")
         results = response.data["results"]
@@ -456,17 +750,19 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         # Expect 2 documents returned
         self.assertEqual(len(results), 2)
 
-        for idx, subset in enumerate(
-            [{"id": 1, "title": "invoice"}, {"id": 3, "title": "bank statement 3"}],
-        ):
-            result = results[idx]
-            # Assert subset in results
-            self.assertDictEqual(result, {**result, **subset})
+        result_map = {r["id"]: r for r in results}
+        self.assertEqual(set(result_map.keys()), {1, 3})
+        for subset in [
+            {"id": 1, "title": "invoice"},
+            {"id": 3, "title": "bank statement 3"},
+        ]:
+            r = result_map[subset["id"]]
+            self.assertDictEqual(r, {**r, **subset})
 
     @override_settings(
         TIME_ZONE="Europe/Sofia",
     )
-    def test_search_added_specific_date_with_timezone_ahead(self):
+    def test_search_added_specific_date_with_timezone_ahead(self) -> None:
         """
         GIVEN:
             - Two documents added right now
@@ -501,10 +797,10 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         # Django converts dates to UTC
         d3.refresh_from_db()
 
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/documents/?query=added:20231201")
         results = response.data["results"]
@@ -512,21 +808,65 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         # Expect 1 document returned
         self.assertEqual(len(results), 1)
 
-        for idx, subset in enumerate(
-            [{"id": 3, "title": "bank statement 3"}],
-        ):
-            result = results[idx]
-            # Assert subset in results
-            self.assertDictEqual(result, {**result, **subset})
+        self.assertEqual(results[0]["id"], 3)
+        self.assertEqual(results[0]["title"], "bank statement 3")
 
-    def test_search_added_invalid_date(self):
+    def test_search_added_previous_month_excludes_next_period_start(self) -> None:
+        """
+        GIVEN:
+            - One document added at the last instant of last month
+            - One document added exactly at the first instant of this month
+        WHEN:
+            - Query for documents added in the previous month
+        THEN:
+            - Only the document from last month is returned; the document dated
+              exactly at the start of this month (the exclusive upper bound of
+              the range) is not
+        """
+        d1 = DocumentFactory.create(
+            title="end of last month",
+            content="last instant of last month",
+            checksum="A",
+            pk=1,
+            added=timezone.make_aware(datetime.datetime(2024, 1, 31, 23, 59, 59)),
+        )
+        d2 = DocumentFactory.create(
+            title="start of this month",
+            content="first instant of this month",
+            checksum="B",
+            pk=2,
+            added=timezone.make_aware(datetime.datetime(2024, 2, 1, 0, 0, 0)),
+        )
+
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+
+        with time_machine.travel(
+            timezone.make_aware(datetime.datetime(2024, 2, 15, 12, 0, 0)),
+            tick=False,
+        ):
+            response = self.client.get("/api/documents/?query=added:previous month")
+        assert response.status_code == 200, (
+            f"expected a successful search response, got {response.status_code}: "
+            f"{response.data!r}"
+        )
+        results = response.data["results"]
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["id"], 1)
+        self.assertEqual(results[0]["title"], "end of last month")
+
+    def test_search_added_invalid_date(self) -> None:
         """
         GIVEN:
             - One document added right now
         WHEN:
-            - Query with invalid added date
+            - Query with an invalid added date
         THEN:
-            - No documents returned
+            - 400 Bad Request with a message naming the malformed date, so the
+              user knows their date is invalid rather than silently getting zero
+              results
         """
         d1 = Document.objects.create(
             title="invoice",
@@ -535,17 +875,102 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             pk=1,
         )
 
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
+        get_backend().add_or_update(d1)
 
         response = self.client.get("/api/documents/?query=added:invalid-date")
+
+        # An unparsable date is reported as a malformed query, not silently empty.
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("invalid-date", str(response.data["query"]))
+
+    def test_search_multiple_bad_fields_returns_all_messages(self) -> None:
+        """
+        GIVEN:
+            - One document added
+        WHEN:
+            - Query with multiple bad fields (e.g. invalid date and invalid number)
+        THEN:
+            - 400 Bad Request with error messages for every bad field,
+              so the user can fix them all in one round-trip
+        """
+        response = self.client.get(
+            "/api/documents/",
+            {"query": "created:notadate AND asn:notanumber"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        messages = response.data["query"]
+        self.assertEqual(len(messages), 2)
+        self.assertTrue(any("created" in m for m in messages))
+        self.assertTrue(any("asn" in m for m in messages))
+
+    @override_settings(
+        TIME_ZONE="UTC",
+    )
+    @time_machine.travel(
+        datetime.datetime(2026, 7, 15, 12, 0, tzinfo=datetime.UTC),
+        tick=False,
+    )
+    def test_search_added_previous_quarter(self) -> None:
+        """
+        GIVEN:
+            - Documents inside and outside the previous quarter
+        WHEN:
+            - Query with the legacy natural-language phrase used by the UI
+        THEN:
+            - Previous-quarter documents are returned
+        """
+        d1 = DocumentFactory.create(
+            title="quarterly statement april",
+            content="bank statement",
+            added=datetime.datetime(2026, 4, 10, 12, 0, tzinfo=datetime.UTC),
+        )
+        d2 = DocumentFactory.create(
+            title="quarterly statement june",
+            content="bank statement",
+            added=datetime.datetime(2026, 6, 20, 12, 0, tzinfo=datetime.UTC),
+        )
+        d3 = DocumentFactory.create(
+            title="quarterly statement july",
+            content="bank statement",
+            added=datetime.datetime(2026, 7, 10, 12, 0, tzinfo=datetime.UTC),
+        )
+
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
+
+        response = self.client.get('/api/documents/?query=added:"previous quarter"')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
         results = response.data["results"]
+        self.assertEqual({r["id"] for r in results}, {1, 2})
 
-        # Expect 0 document returned
-        self.assertEqual(len(results), 0)
+    @mock.patch("documents.search._backend.parse_user_query")
+    def test_search_parser_bug_surfaces_as_500_not_400(self, m) -> None:
+        """
+        GIVEN:
+            - The query parser itself fails (a whoosh-compat bug, per
+              QueryParserError's own contract: not user-fixable input)
+        WHEN:
+            - Any search request runs
+        THEN:
+            - The error surfaces as a 500 monitoring can see, never a 400
+              blaming the user for a library defect
+        """
+        from whoosh_compat.errors import QueryParserError
 
-    @mock.patch("documents.index.autocomplete")
-    def test_search_autocomplete_limits(self, m):
+        m.side_effect = QueryParserError("synthetic parser bug")
+
+        self.client.raise_request_exception = False
+        response = self.client.get("/api/documents/?query=anything")
+        self.assertEqual(
+            response.status_code,
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    @mock.patch("documents.search._backend.TantivyBackend.autocomplete")
+    def test_search_autocomplete_limits(self, m) -> None:
         """
         GIVEN:
             - No pre-conditions
@@ -556,7 +981,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             - Limit requests are obeyed
         """
 
-        m.side_effect = lambda ix, term, limit, user: [term for _ in range(limit)]
+        m.side_effect = lambda term, limit, user=None: [term for _ in range(limit)]
 
         response = self.client.get("/api/search/autocomplete/?term=test")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -576,7 +1001,22 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 10)
 
-    def test_search_autocomplete_respect_permissions(self):
+    def test_search_autocomplete_head_requires_view_document(self) -> None:
+        """
+        GIVEN:
+            - A user without the global view document permission
+        WHEN:
+            - A HEAD request is made for autocomplete
+        THEN:
+            - It is rejected like the equivalent GET request
+        """
+        self.client.force_authenticate(user=UserFactory())
+
+        response = self.client.head("/api/search/autocomplete/?term=test")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_search_autocomplete_respect_permissions(self) -> None:
         """
         GIVEN:
             - Multiple users and documents with & without permissions
@@ -585,8 +1025,9 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         THEN:
             - Terms only within docs user has access to are returned
         """
-        u1 = User.objects.create_user("user1")
-        u2 = User.objects.create_user("user2")
+        u1 = UserFactory(username="user1")
+        u2 = UserFactory(username="user2")
+        grant_global(u1, "view_document")
 
         self.client.force_authenticate(user=u1)
 
@@ -609,34 +1050,55 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             owner=u1,
         )
 
-        with AsyncWriter(index.open_index()) as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/search/autocomplete/?term=app")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data, [b"apples", b"applebaum", b"appletini"])
+        self.assertEqual(response.data, ["applebaum", "apples", "appletini"])
 
         d3.owner = u2
-
-        with AsyncWriter(index.open_index()) as writer:
-            index.update_document(writer, d3)
-
-        response = self.client.get("/api/search/autocomplete/?term=app")
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data, [b"apples", b"applebaum"])
-
-        assign_perm("view_document", u1, d3)
-
-        with AsyncWriter(index.open_index()) as writer:
-            index.update_document(writer, d3)
+        d3.save()
+        backend.add_or_update(d3)
 
         response = self.client.get("/api/search/autocomplete/?term=app")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data, [b"apples", b"applebaum", b"appletini"])
+        self.assertEqual(response.data, ["applebaum", "apples"])
 
-    def test_search_autocomplete_field_name_match(self):
+        grant_object(u1, d3, "view_document")
+        backend.add_or_update(d3)
+
+        response = self.client.get("/api/search/autocomplete/?term=app")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, ["applebaum", "apples", "appletini"])
+
+    def test_search_autocomplete_group_revocation_is_immediate(self) -> None:
+        user = UserFactory(username="group-user")
+        owner = UserFactory(username="document-owner")
+        group = Group.objects.create(name="temporary-viewers")
+        grant_global(user, "view_document")
+        user.groups.add(group)
+
+        document = Document.objects.create(
+            title="private",
+            content="canarysecretautocomplete",
+            checksum="group-revocation",
+            owner=owner,
+        )
+        grant_object(group, document, "view_document")
+        get_backend().add_or_update(document)
+        self.client.force_authenticate(user=user)
+
+        response = self.client.get("/api/search/autocomplete/?term=canarysecret")
+        self.assertEqual(response.data, ["canarysecretautocomplete"])
+
+        user.groups.remove(group)
+        response = self.client.get("/api/search/autocomplete/?term=canarysecret")
+        self.assertEqual(response.data, [])
+
+    def test_search_autocomplete_field_name_match(self) -> None:
         """
         GIVEN:
             - One document exists in index (must be one document to experience the crash)
@@ -652,14 +1114,13 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             checksum="1",
         )
 
-        with AsyncWriter(index.open_index()) as writer:
-            index.update_document(writer, d1)
+        get_backend().add_or_update(d1)
 
         response = self.client.get("/api/search/autocomplete/?term=created:2023")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data, [])
 
-    def test_search_autocomplete_search_term(self):
+    def test_search_autocomplete_search_term(self) -> None:
         """
         GIVEN:
             - Search results for autocomplete include the exact search term
@@ -674,55 +1135,70 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             checksum="1",
         )
 
-        with AsyncWriter(index.open_index()) as writer:
-            index.update_document(writer, d1)
+        get_backend().add_or_update(d1)
 
         response = self.client.get("/api/search/autocomplete/?term=auto")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data[0], b"auto")
+        self.assertEqual(response.data[0], "auto")
 
-    def test_search_spelling_suggestion(self):
-        with AsyncWriter(index.open_index()) as writer:
-            for i in range(55):
-                doc = Document.objects.create(
-                    checksum=str(i),
-                    pk=i + 1,
-                    title=f"Document {i + 1}",
-                    content=f"Things document {i + 1}",
-                )
-                index.update_document(writer, doc)
-
-        response = self.client.get("/api/documents/?query=thing")
-        correction = response.data["corrected_query"]
-
-        self.assertEqual(correction, "things")
-
-        response = self.client.get("/api/documents/?query=things")
-        correction = response.data["corrected_query"]
-
-        self.assertEqual(correction, None)
-
-    @mock.patch(
-        "whoosh.searching.Searcher.correct_query",
-        side_effect=Exception("Test error"),
-    )
-    def test_corrected_query_error(self, mock_correct_query):
+    def test_search_no_spelling_suggestion(self) -> None:
         """
         GIVEN:
-            - A query that raises an error on correction
+            - Documents exist with various terms
         WHEN:
-            - API request for search with that query
+            - Query for documents with any term
         THEN:
-            - The error is logged and the search proceeds
+            - corrected_query is always None (Tantivy has no spell correction)
         """
-        with self.assertLogs("paperless.index", level="INFO") as cm:
-            response = self.client.get("/api/documents/?query=2025-06-04")
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            error_str = cm.output[0]
-            expected_str = "Error while correcting query '2025-06-04': Test error"
-            self.assertIn(expected_str, error_str)
+        backend = get_backend()
+        for i in range(5):
+            doc = Document.objects.create(
+                checksum=str(i),
+                pk=i + 1,
+                title=f"Document {i + 1}",
+                content=f"Things document {i + 1}",
+            )
+            backend.add_or_update(doc)
 
-    def test_search_more_like(self):
+        response = self.client.get("/api/documents/?query=thing")
+        self.assertIsNone(response.data["corrected_query"])
+
+        response = self.client.get("/api/documents/?query=things")
+        self.assertIsNone(response.data["corrected_query"])
+
+    def test_search_spelling_suggestion_suppressed_for_private_terms(self) -> None:
+        owner = UserFactory(username="owner")
+        attacker = UserFactory(username="attacker")
+        grant_global(attacker, "view_document")
+
+        backend = get_backend()
+        for i in range(5):
+            private_doc = Document.objects.create(
+                checksum=f"p{i}",
+                pk=100 + i,
+                title=f"Private Document {i + 1}",
+                content=f"treasury document {i + 1}",
+                owner=owner,
+            )
+            visible_doc = Document.objects.create(
+                checksum=f"v{i}",
+                pk=200 + i,
+                title=f"Visible Document {i + 1}",
+                content=f"public ledger {i + 1}",
+                owner=attacker,
+            )
+            backend.add_or_update(private_doc)
+            backend.add_or_update(visible_doc)
+
+        self.client.force_authenticate(user=attacker)
+
+        response = self.client.get("/api/documents/?query=treasurx")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["count"], 0)
+        self.assertIsNone(response.data["corrected_query"])
+
+    def test_search_more_like(self) -> None:
         """
         GIVEN:
             - Documents exist which have similar content
@@ -732,35 +1208,57 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         THEN:
             - The similar documents are returned from the API request
         """
-        d1 = Document.objects.create(
-            title="invoice",
-            content="the thing i bought at a shop and paid with bank account",
-            checksum="A",
-            pk=1,
-        )
-        d2 = Document.objects.create(
-            title="bank statement 1",
-            content="things i paid for in august",
-            pk=2,
-            checksum="B",
-        )
-        d3 = Document.objects.create(
-            title="bank statement 3",
-            content="things i paid for in september",
-            pk=3,
-            checksum="C",
-        )
-        d4 = Document.objects.create(
-            title="Monty Python & the Holy Grail",
-            content="And now for something completely different",
-            pk=4,
-            checksum="ABC",
-        )
-        with AsyncWriter(index.open_index()) as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
-            index.update_document(writer, d4)
+        # Distinct created/added/modified dates: documents sharing a timestamp
+        # term (down to the second) would be matched on it by more_like_this
+        # (which cannot be scoped to content fields), surfacing unrelated
+        # documents. `modified` is auto_now, so it can't be set via factory
+        # kwargs like created/added - freeze time per document instead so all
+        # three date fields land on distinct seconds.
+        with time_machine.travel(
+            timezone.make_aware(datetime.datetime(2018, 1, 1)),
+            tick=False,
+        ):
+            d1 = DocumentFactory(
+                title="invoice",
+                content="the thing i bought at a shop and paid with bank account",
+                created=datetime.date(2018, 1, 1),
+                added=timezone.make_aware(datetime.datetime(2018, 1, 1)),
+            )
+        with time_machine.travel(
+            timezone.make_aware(datetime.datetime(2019, 3, 4)),
+            tick=False,
+        ):
+            d2 = DocumentFactory(
+                title="bank statement 1",
+                content="things i paid for in august",
+                created=datetime.date(2019, 3, 4),
+                added=timezone.make_aware(datetime.datetime(2019, 3, 4)),
+            )
+        with time_machine.travel(
+            timezone.make_aware(datetime.datetime(2020, 7, 9)),
+            tick=False,
+        ):
+            d3 = DocumentFactory(
+                title="bank statement 3",
+                content="things i paid for in september",
+                created=datetime.date(2020, 7, 9),
+                added=timezone.make_aware(datetime.datetime(2020, 7, 9)),
+            )
+        with time_machine.travel(
+            timezone.make_aware(datetime.datetime(2021, 11, 30)),
+            tick=False,
+        ):
+            d4 = DocumentFactory(
+                title="Quarterly Report",
+                content="quarterly revenue profit margin earnings growth",
+                created=datetime.date(2021, 11, 30),
+                added=timezone.make_aware(datetime.datetime(2021, 11, 30)),
+            )
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
+        backend.add_or_update(d4)
 
         response = self.client.get(f"/api/documents/?more_like_id={d2.id}")
 
@@ -768,11 +1266,163 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
 
         results = response.data["results"]
 
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0]["id"], d3.id)
-        self.assertEqual(results[1]["id"], d1.id)
+        self.assertGreaterEqual(len(results), 1)
+        result_ids = [r["id"] for r in results]
+        self.assertIn(d3.id, result_ids)
+        self.assertNotIn(d4.id, result_ids)
 
-    def test_search_filtering(self):
+    def test_search_more_like_version_uses_its_root(self) -> None:
+        """
+        GIVEN:
+            - A document similar in content to a root document, and one that is not
+            - A version of the root document, which is never indexed
+        WHEN:
+            - API request for more like the version
+        THEN:
+            - The documents similar to the root are returned, not the version
+        """
+        indexed = {}
+        for name, title, content, day in (
+            ("root", "bank statement 1", "things i paid for in august", (2019, 3, 4)),
+            (
+                "similar",
+                "bank statement 3",
+                "things i paid for in september",
+                (2020, 7, 9),
+            ),
+            (
+                "other",
+                "Quarterly Report",
+                "quarterly revenue profit margin",
+                (2021, 11, 30),
+            ),
+        ):
+            with time_machine.travel(
+                timezone.make_aware(datetime.datetime(*day)),
+                tick=False,
+            ):
+                indexed[name] = DocumentFactory(
+                    title=title,
+                    content=content,
+                    created=datetime.date(*day),
+                    added=timezone.make_aware(datetime.datetime(*day)),
+                )
+        version = DocumentFactory(
+            root_document=indexed["root"],
+            version_index=1,
+            content="things i paid for in august",
+        )
+        backend = get_backend()
+        for document in indexed.values():
+            backend.add_or_update(document)
+
+        response = self.client.get(f"/api/documents/?more_like_id={version.id}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result_ids = [r["id"] for r in response.data["results"]]
+        self.assertIn(indexed["similar"].id, result_ids)
+        self.assertNotIn(indexed["other"].id, result_ids)
+        self.assertNotIn(version.id, result_ids)
+
+    def test_more_like_requires_id_of_existing_document(self) -> None:
+        """
+        GIVEN:
+            - No document with the given ID exists
+        WHEN:
+            - API request for more like a given document is made with a non-existent document ID
+        THEN:
+            - 403 Forbidden is returned with an appropriate error message
+        """
+        response = self.client.get("/api/documents/?more_like_id=9999")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.content, b"Invalid more_like_id")
+
+    def test_search_more_like_requires_view_permission_on_seed_document(
+        self,
+    ) -> None:
+        """
+        GIVEN:
+            - A user can search documents they own
+            - Another user's private document exists with similar content
+        WHEN:
+            - The user requests more-like-this for the private seed document
+        THEN:
+            - The request is rejected
+        """
+        owner = UserFactory(username="owner")
+        attacker = UserFactory(username="attacker")
+        grant_global(attacker, "view_document")
+
+        private_seed = Document.objects.create(
+            title="private bank statement",
+            content="quarterly treasury bank statement wire transfer",
+            checksum="seed",
+            owner=owner,
+            pk=10,
+        )
+        visible_doc = Document.objects.create(
+            title="attacker-visible match",
+            content="quarterly treasury bank statement wire transfer summary",
+            checksum="visible",
+            owner=attacker,
+            pk=11,
+        )
+        other_doc = Document.objects.create(
+            title="unrelated",
+            content="completely different topic",
+            checksum="other",
+            owner=attacker,
+            pk=12,
+        )
+
+        backend = get_backend()
+        backend.add_or_update(private_seed)
+        backend.add_or_update(visible_doc)
+        backend.add_or_update(other_doc)
+
+        self.client.force_authenticate(user=attacker)
+
+        response = self.client.get(
+            f"/api/documents/?more_like_id={private_seed.id}",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.content, b"Insufficient permissions.")
+
+    def test_search_more_like_version_requires_view_permission_on_its_root(
+        self,
+    ) -> None:
+        """
+        GIVEN:
+            - Another user's private root document with an unowned version
+        WHEN:
+            - A user without access requests more-like-this for the version
+        THEN:
+            - The request is rejected, the version's missing owner grants nothing
+        """
+        owner = UserFactory(username="owner")
+        attacker = UserFactory(username="attacker")
+        grant_global(attacker, "view_document")
+        private_root = DocumentFactory(
+            title="private bank statement",
+            content="quarterly treasury bank statement wire transfer",
+            owner=owner,
+        )
+        version = DocumentFactory(
+            root_document=private_root,
+            version_index=1,
+            owner=None,
+        )
+        get_backend().add_or_update(private_root)
+
+        self.client.force_authenticate(user=attacker)
+
+        response = self.client.get(f"/api/documents/?more_like_id={version.id}")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.content, b"Insufficient permissions.")
+
+    def test_search_filtering(self) -> None:
         t = Tag.objects.create(name="tag")
         t2 = Tag.objects.create(name="tag2")
         c = Correspondent.objects.create(name="correspondent")
@@ -835,9 +1485,9 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             value_text="foobard4",
         )
 
-        with AsyncWriter(index.open_index()) as writer:
-            for doc in Document.objects.all():
-                index.update_document(writer, doc)
+        backend = get_backend()
+        for doc in Document.objects.all():
+            backend.add_or_update(doc)
 
         def search_query(q):
             r = self.client.get("/api/documents/?query=test" + q)
@@ -1031,7 +1681,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             ),
         )
 
-    def test_search_filtering_respect_owner(self):
+    def test_search_filtering_respect_owner(self) -> None:
         """
         GIVEN:
             - Documents with owners set & without
@@ -1042,20 +1692,20 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             - Only owned docs are returned for regular users
             - All docs are returned for superuser
         """
-        superuser = User.objects.create_superuser("superuser")
-        u1 = User.objects.create_user("user1")
-        u2 = User.objects.create_user("user2")
-        u1.user_permissions.add(*Permission.objects.filter(codename="view_document"))
-        u2.user_permissions.add(*Permission.objects.filter(codename="view_document"))
+        superuser = UserFactory(username="superuser", superuser=True)
+        u1 = UserFactory(username="user1")
+        u2 = UserFactory(username="user2")
+        grant_global(u1, "view_document")
+        grant_global(u2, "view_document")
 
         Document.objects.create(checksum="1", content="test 1", owner=u1)
         Document.objects.create(checksum="2", content="test 2", owner=u2)
         Document.objects.create(checksum="3", content="test 3", owner=u2)
         Document.objects.create(checksum="4", content="test 4")
 
-        with AsyncWriter(index.open_index()) as writer:
-            for doc in Document.objects.all():
-                index.update_document(writer, doc)
+        backend = get_backend()
+        for doc in Document.objects.all():
+            backend.add_or_update(doc)
 
         self.client.force_authenticate(user=u1)
         r = self.client.get("/api/documents/?query=test")
@@ -1087,7 +1737,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         r = self.client.get(f"/api/documents/?query=test&owner__id__none={u1.id}")
         self.assertEqual(r.data["count"], 3)
 
-    def test_search_filtering_with_object_perms(self):
+    def test_search_filtering_with_object_perms(self) -> None:
         """
         GIVEN:
             - Documents with granted view permissions to others
@@ -1096,19 +1746,19 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         THEN:
             - Only docs with granted view permissions are returned
         """
-        u1 = User.objects.create_user("user1")
-        u2 = User.objects.create_user("user2")
-        u1.user_permissions.add(*Permission.objects.filter(codename="view_document"))
-        u2.user_permissions.add(*Permission.objects.filter(codename="view_document"))
+        u1 = UserFactory(username="user1")
+        u2 = UserFactory(username="user2")
+        grant_global(u1, "view_document")
+        grant_global(u2, "view_document")
 
         d1 = Document.objects.create(checksum="1", content="test 1", owner=u1)
         d2 = Document.objects.create(checksum="2", content="test 2", owner=u2)
         d3 = Document.objects.create(checksum="3", content="test 3", owner=u2)
         Document.objects.create(checksum="4", content="test 4")
 
-        with AsyncWriter(index.open_index()) as writer:
-            for doc in Document.objects.all():
-                index.update_document(writer, doc)
+        backend = get_backend()
+        for doc in Document.objects.all():
+            backend.add_or_update(doc)
 
         self.client.force_authenticate(user=u1)
         r = self.client.get("/api/documents/?query=test")
@@ -1124,13 +1774,13 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         r = self.client.get("/api/documents/?query=test&owner__isnull=true")
         self.assertEqual(r.data["count"], 1)
 
-        assign_perm("view_document", u1, d2)
-        assign_perm("view_document", u1, d3)
-        assign_perm("view_document", u2, d1)
+        grant_object(u1, d2, "view_document")
+        grant_object(u1, d3, "view_document")
+        grant_object(u2, d1, "view_document")
 
-        with AsyncWriter(index.open_index()) as writer:
-            for doc in [d1, d2, d3]:
-                index.update_document(writer, doc)
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
 
         self.client.force_authenticate(user=u1)
         r = self.client.get("/api/documents/?query=test")
@@ -1148,9 +1798,9 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         r = self.client.get(f"/api/documents/?query=test&shared_by__id={u1.id}")
         self.assertEqual(r.data["count"], 1)
 
-    def test_search_sorting(self):
-        u1 = User.objects.create_user("user1")
-        u2 = User.objects.create_user("user2")
+    def test_search_sorting(self) -> None:
+        u1 = UserFactory(username="user1")
+        u2 = UserFactory(username="user2")
         c1 = Correspondent.objects.create(name="corres Ax")
         c2 = Correspondent.objects.create(name="corres Cx")
         c3 = Correspondent.objects.create(name="corres Bx")
@@ -1193,9 +1843,9 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             user=u1,
         )
 
-        with AsyncWriter(index.open_index()) as writer:
-            for doc in Document.objects.all():
-                index.update_document(writer, doc)
+        backend = get_backend()
+        for doc in Document.objects.all():
+            backend.add_or_update(doc)
 
         def search_query(q):
             r = self.client.get("/api/documents/?query=test" + q)
@@ -1228,17 +1878,138 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             search_query("&ordering=-num_notes"),
             [d1.id, d3.id, d2.id],
         )
+        # owner sort: ORM orders by owner_id (integer); NULLs first in SQLite ASC
         self.assertListEqual(
             search_query("&ordering=owner"),
-            [d1.id, d2.id, d3.id],
+            [d3.id, d1.id, d2.id],
         )
         self.assertListEqual(
             search_query("&ordering=-owner"),
-            [d3.id, d2.id, d1.id],
+            [d2.id, d1.id, d3.id],
         )
 
+    def test_search_ordering_by_score(self) -> None:
+        """ordering=-score must return results in descending relevance order (best first)."""
+        backend = get_backend()
+        # doc_high has more occurrences of the search term → higher BM25 score
+        doc_low = Document.objects.create(
+            title="score sort low",
+            content="apple",
+            checksum="SCL1",
+        )
+        doc_high = Document.objects.create(
+            title="score sort high",
+            content="apple apple apple apple apple",
+            checksum="SCH1",
+        )
+        backend.add_or_update(doc_low)
+        backend.add_or_update(doc_high)
+
+        # -score = descending = best first (highest score)
+        response = self.client.get("/api/documents/?query=apple&ordering=-score")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertEqual(
+            ids[0],
+            doc_high.id,
+            "Most relevant doc should be first for -score",
+        )
+
+        # score = ascending = worst first (lowest score)
+        response = self.client.get("/api/documents/?query=apple&ordering=score")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertEqual(
+            ids[0],
+            doc_low.id,
+            "Least relevant doc should be first for +score",
+        )
+
+    def test_search_with_tantivy_native_sort(self) -> None:
+        """When ordering by a Tantivy-sortable field, results must be correctly sorted."""
+        backend = get_backend()
+        for i, asn in enumerate([30, 10, 20]):
+            doc = Document.objects.create(
+                title=f"sortable doc {i}",
+                content="searchable content",
+                checksum=f"TNS{i}",
+                archive_serial_number=asn,
+            )
+            backend.add_or_update(doc)
+
+        response = self.client.get(
+            "/api/documents/?query=searchable&ordering=archive_serial_number",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        asns = [doc["archive_serial_number"] for doc in response.data["results"]]
+        self.assertEqual(asns, [10, 20, 30])
+
+        response = self.client.get(
+            "/api/documents/?query=searchable&ordering=-archive_serial_number",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        asns = [doc["archive_serial_number"] for doc in response.data["results"]]
+        self.assertEqual(asns, [30, 20, 10])
+
+    def test_search_page_2_returns_correct_slice(self) -> None:
+        """Page 2 must return the second slice, not overlap with page 1."""
+        backend = get_backend()
+        for i in range(10):
+            doc = Document.objects.create(
+                title=f"doc {i}",
+                content="paginated content",
+                checksum=f"PG2{i}",
+                archive_serial_number=i + 1,
+            )
+            backend.add_or_update(doc)
+
+        response = self.client.get(
+            "/api/documents/?query=paginated&ordering=archive_serial_number&page=1&page_size=3",
+        )
+        page1_ids = [r["id"] for r in response.data["results"]]
+        self.assertEqual(len(page1_ids), 3)
+
+        response = self.client.get(
+            "/api/documents/?query=paginated&ordering=archive_serial_number&page=2&page_size=3",
+        )
+        page2_ids = [r["id"] for r in response.data["results"]]
+        self.assertEqual(len(page2_ids), 3)
+
+        # No overlap between pages
+        self.assertEqual(set(page1_ids) & set(page2_ids), set())
+        # Page 2 ASNs are higher than page 1
+        page1_asns = [
+            Document.objects.get(pk=pk).archive_serial_number for pk in page1_ids
+        ]
+        page2_asns = [
+            Document.objects.get(pk=pk).archive_serial_number for pk in page2_ids
+        ]
+        self.assertTrue(max(page1_asns) < min(page2_asns))
+
+    def test_search_all_field_contains_all_ids_when_paginated(self) -> None:
+        """The 'all' field must contain every matching ID, even when paginated."""
+        backend = get_backend()
+        doc_ids = []
+        for i in range(10):
+            doc = Document.objects.create(
+                title=f"all field doc {i}",
+                content="allfield content",
+                checksum=f"AF{i}",
+            )
+            backend.add_or_update(doc)
+            doc_ids.append(doc.pk)
+
+        response = self.client.get(
+            "/api/documents/?query=allfield&page=1&page_size=3",
+            headers={"Accept": "application/json; version=9"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["results"]), 3)
+        # "all" must contain ALL 10 matching IDs
+        self.assertCountEqual(response.data["all"], doc_ids)
+
     @mock.patch("documents.bulk_edit.bulk_update_documents")
-    def test_global_search(self, m):
+    def test_global_search(self, m) -> None:
         """
         GIVEN:
             - Multiple documents and objects
@@ -1279,8 +2050,8 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             pk=5,
         )
 
-        user1 = User.objects.create_user("bank user1")
-        user2 = User.objects.create_superuser("user2")
+        user1 = UserFactory(username="bank user1")
+        user2 = UserFactory(username="user2", superuser=True)
         group1 = Group.objects.create(name="bank group1")
         Group.objects.create(name="group2")
 
@@ -1291,12 +2062,12 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         )
         set_permissions([4, 5], set_permissions={}, owner=user2, merge=False)
 
-        with index.open_index_writer() as writer:
-            index.update_document(writer, d1)
-            index.update_document(writer, d2)
-            index.update_document(writer, d3)
-            index.update_document(writer, d4)
-            index.update_document(writer, d5)
+        backend = get_backend()
+        backend.add_or_update(d1)
+        backend.add_or_update(d2)
+        backend.add_or_update(d3)
+        backend.add_or_update(d4)
+        backend.add_or_update(d5)
 
         correspondent1 = Correspondent.objects.create(name="bank correspondent 1")
         Correspondent.objects.create(name="correspondent 2")
@@ -1307,13 +2078,12 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         tag1 = Tag.objects.create(name="bank tag1")
         Tag.objects.create(name="tag2")
 
-        SavedView.objects.create(
+        shared_view = SavedView.objects.create(
             name="bank view",
-            show_on_dashboard=True,
-            show_in_sidebar=True,
             sort_field="",
-            owner=user1,
+            owner=user2,
         )
+        grant_object(user1, shared_view, "view_savedview")
         mail_account1 = MailAccount.objects.create(name="bank mail account 1")
         mail_account2 = MailAccount.objects.create(name="mail account 2")
         mail_rule1 = MailRule.objects.create(
@@ -1357,7 +2127,106 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         self.assertEqual(results["custom_fields"][0]["id"], custom_field1.id)
         self.assertEqual(results["workflows"][0]["id"], workflow1.id)
 
-    def test_global_search_bad_request(self):
+    def test_global_search_db_only_limits_documents_to_title_matches(self) -> None:
+        title_match = Document.objects.create(
+            title="bank statement",
+            content="no additional terms",
+            checksum="GS1",
+            pk=21,
+        )
+        content_only = Document.objects.create(
+            title="not a title match",
+            content="bank appears only in content",
+            checksum="GS2",
+            pk=22,
+        )
+
+        backend = get_backend()
+        backend.add_or_update(title_match)
+        backend.add_or_update(content_only)
+
+        self.client.force_authenticate(self.user)
+
+        response = self.client.get("/api/search/?query=bank&db_only=true")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data["documents"]), 1)
+        self.assertEqual(response.data["documents"][0]["id"], title_match.id)
+
+    def test_global_search_filters_owned_mail_objects(self) -> None:
+        user1 = UserFactory(username="mail-search-user")
+        user2 = UserFactory(username="other-mail-search-user")
+        grant_global(user1, "view_mailaccount", "view_mailrule")
+
+        own_account = MailAccount.objects.create(
+            name="bank owned account",
+            username="owner@example.com",
+            password="secret",
+            imap_server="imap.owner.example.com",
+            imap_port=993,
+            imap_security=MailAccount.ImapSecurity.SSL,
+            character_set="UTF-8",
+            owner=user1,
+        )
+        other_account = MailAccount.objects.create(
+            name="bank other account",
+            username="other@example.com",
+            password="secret",
+            imap_server="imap.other.example.com",
+            imap_port=993,
+            imap_security=MailAccount.ImapSecurity.SSL,
+            character_set="UTF-8",
+            owner=user2,
+        )
+        unowned_account = MailAccount.objects.create(
+            name="bank shared account",
+            username="shared@example.com",
+            password="secret",
+            imap_server="imap.shared.example.com",
+            imap_port=993,
+            imap_security=MailAccount.ImapSecurity.SSL,
+            character_set="UTF-8",
+        )
+        own_rule = MailRule.objects.create(
+            name="bank owned rule",
+            account=own_account,
+            action=MailRule.MailAction.MOVE,
+            owner=user1,
+        )
+        other_rule = MailRule.objects.create(
+            name="bank other rule",
+            account=other_account,
+            action=MailRule.MailAction.MOVE,
+            owner=user2,
+        )
+        unowned_rule = MailRule.objects.create(
+            name="bank shared rule",
+            account=unowned_account,
+            action=MailRule.MailAction.MOVE,
+        )
+
+        self.client.force_authenticate(user1)
+
+        response = self.client.get("/api/search/?query=bank")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertCountEqual(
+            [account["id"] for account in response.data["mail_accounts"]],
+            [own_account.id, unowned_account.id],
+        )
+        self.assertCountEqual(
+            [rule["id"] for rule in response.data["mail_rules"]],
+            [own_rule.id, unowned_rule.id],
+        )
+        self.assertNotIn(
+            other_account.id,
+            [account["id"] for account in response.data["mail_accounts"]],
+        )
+        self.assertNotIn(
+            other_rule.id,
+            [rule["id"] for rule in response.data["mail_rules"]],
+        )
+
+    def test_global_search_bad_request(self) -> None:
         """
         WHEN:
             - Global search query is made without or with query < 3 characters
@@ -1368,3 +2237,77 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         response = self.client.get("/api/search/?query=no")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def _assert_query_finds(self, doc: Document, query: str) -> None:
+        get_backend().add_or_update(doc)
+        response = self.client.get("/api/documents/", {"query": query})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = [r["id"] for r in response.data["results"]]
+        self.assertIn(doc.id, ids)
+
+    def test_search_by_asn(self) -> None:
+        """
+        GIVEN:
+            - A document with an archive serial number, indexed
+        WHEN:
+            - A query filters by "asn:<value>"
+        THEN:
+            - The document is found
+        """
+        doc = Document.objects.create(
+            title="Has ASN",
+            content="content",
+            checksum="asn-checksum",
+            archive_serial_number=555,
+        )
+        self._assert_query_finds(doc, "asn:555")
+
+    def test_search_by_page_count(self) -> None:
+        """
+        GIVEN:
+            - A document with a page count, indexed
+        WHEN:
+            - A query filters by "page_count:<value>"
+        THEN:
+            - The document is found
+        """
+        doc = Document.objects.create(
+            title="Multi-page",
+            content="content",
+            checksum="page-count-checksum",
+            page_count=42,
+        )
+        self._assert_query_finds(doc, "page_count:42")
+
+    def test_search_by_original_filename(self) -> None:
+        """
+        GIVEN:
+            - A document with an original filename, indexed
+        WHEN:
+            - A query filters by "original_filename:<value>"
+        THEN:
+            - The document is found
+        """
+        doc = Document.objects.create(
+            title="Named file",
+            content="content",
+            checksum="filename-checksum",
+            original_filename="quarterly-report.pdf",
+        )
+        self._assert_query_finds(doc, "original_filename:quarterly-report.pdf")
+
+    def test_search_by_checksum(self) -> None:
+        """
+        GIVEN:
+            - A document with a checksum, indexed
+        WHEN:
+            - A query filters by "checksum:<value>"
+        THEN:
+            - The document is found
+        """
+        doc = Document.objects.create(
+            title="Checksum doc",
+            content="content",
+            checksum="deadbeef1234",
+        )
+        self._assert_query_finds(doc, "checksum:deadbeef1234")

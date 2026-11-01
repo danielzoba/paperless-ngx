@@ -1,11 +1,20 @@
-import { Component, OnDestroy, OnInit, inject } from '@angular/core'
 import {
+  Component,
+  DestroyRef,
+  ViewChild,
+  computed,
+  inject,
+  signal,
+} from '@angular/core'
+import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop'
+import {
+  NgbDropdown,
   NgbDropdownModule,
   NgbProgressbarModule,
 } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
-import { Subscription } from 'rxjs'
-import { Toast, ToastService } from 'src/app/services/toast.service'
+import { Subscription, interval, map } from 'rxjs'
+import { Toast, ToastLevel, ToastService } from 'src/app/services/toast.service'
 import { ToastComponent } from '../../common/toast/toast.component'
 
 @Component({
@@ -19,24 +28,46 @@ import { ToastComponent } from '../../common/toast/toast.component'
     NgxBootstrapIconsModule,
   ],
 })
-export class ToastsDropdownComponent implements OnInit, OnDestroy {
+export class ToastsDropdownComponent {
   toastService = inject(ToastService)
+  private destroyRef = inject(DestroyRef)
+  private clock: Subscription
 
-  private subscription: Subscription
+  @ViewChild(NgbDropdown) dropdown: NgbDropdown
 
-  public toasts: Toast[] = []
+  /** Drives the relative timestamps, ticks only while the dropdown is open */
+  readonly now = signal(new Date())
 
-  ngOnDestroy(): void {
-    this.subscription?.unsubscribe()
-  }
+  /** Notifications that were unread when the dropdown was opened */
+  readonly newIds = signal(new Set<string>())
 
-  ngOnInit(): void {
-    this.subscription = this.toastService.getToasts().subscribe((toasts) => {
-      this.toasts = [...toasts]
-    })
-  }
+  readonly toasts = toSignal(
+    this.toastService.getToasts().pipe(map((toasts) => [...toasts])),
+    { initialValue: [] as Toast[] }
+  )
+
+  readonly unread = computed(() => this.toasts().filter((t) => !t.read))
+
+  readonly hasUnreadError = computed(() =>
+    this.unread().some((t) => t.level === ToastLevel.Error)
+  )
 
   onOpenChange(open: boolean): void {
     this.toastService.suppressPopupToasts = open
+    this.clock?.unsubscribe()
+    this.newIds.set(new Set(open ? this.unread().map((t) => t.id) : []))
+    if (open) {
+      this.toastService.markAllRead()
+      this.now.set(new Date())
+      this.clock = interval(30000)
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe(() => this.now.set(new Date()))
+    }
+  }
+
+  /** Using an action (Undo, Open document...) clears it and closes the menu */
+  onActioned(toast: Toast): void {
+    this.toastService.closeToast(toast)
+    this.dropdown?.close()
   }
 }

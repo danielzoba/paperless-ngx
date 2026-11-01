@@ -1,9 +1,7 @@
 from datetime import timedelta
 from unittest import mock
 
-from django.conf import settings
 from django.contrib.auth.models import Permission
-from django.contrib.auth.models import User
 from django.test import TestCase
 from django.test import override_settings
 from django.utils import timezone
@@ -14,32 +12,30 @@ from rest_framework import status
 from paperless_mail.mail import MailAccountHandler
 from paperless_mail.models import MailAccount
 from paperless_mail.oauth import PaperlessMailOAuth2Manager
+from paperless_mail.tests.factories import MailAccountFactory
+from paperless_testing.factories import UserFactory
+from paperless_testing.permissions import grant_global
 
 
+@override_settings(
+    OAUTH_CALLBACK_BASE_URL="http://localhost:8000",
+    GMAIL_OAUTH_CLIENT_ID="test_gmail_client_id",
+    GMAIL_OAUTH_CLIENT_SECRET="test_gmail_client_secret",
+    OUTLOOK_OAUTH_CLIENT_ID="test_outlook_client_id",
+    OUTLOOK_OAUTH_CLIENT_SECRET="test_outlook_client_secret",
+)
 class TestMailOAuth(
     TestCase,
 ):
     def setUp(self) -> None:
-        self.user = User.objects.create_user("testuser")
-        self.user.user_permissions.add(
-            *Permission.objects.filter(
-                codename__in=[
-                    "add_mailaccount",
-                ],
-            ),
-        )
+        self.user = UserFactory(username="testuser")
+        grant_global(self.user, "add_mailaccount")
         self.user.save()
         self.client.force_login(self.user)
         self.mail_account_handler = MailAccountHandler()
-        # Mock settings
-        settings.OAUTH_CALLBACK_BASE_URL = "http://localhost:8000"
-        settings.GMAIL_OAUTH_CLIENT_ID = "test_gmail_client_id"
-        settings.GMAIL_OAUTH_CLIENT_SECRET = "test_gmail_client_secret"
-        settings.OUTLOOK_OAUTH_CLIENT_ID = "test_outlook_client_id"
-        settings.OUTLOOK_OAUTH_CLIENT_SECRET = "test_outlook_client_secret"
         super().setUp()
 
-    def test_generate_paths(self):
+    def test_generate_paths(self) -> None:
         """
         GIVEN:
             - Mocked settings for OAuth callback and base URLs
@@ -95,7 +91,7 @@ class TestMailOAuth(
         self,
         mock_get_outlook_access_token,
         mock_get_gmail_access_token,
-    ):
+    ) -> None:
         """
         GIVEN:
             - Mocked settings for Gmail and Outlook OAuth client IDs and secrets
@@ -148,7 +144,7 @@ class TestMailOAuth(
         )
 
     @mock.patch("httpx_oauth.oauth2.BaseOAuth2.get_access_token")
-    def test_oauth_callback_view_fails(self, mock_get_access_token):
+    def test_oauth_callback_view_fails(self, mock_get_access_token) -> None:
         """
         GIVEN:
             - Mocked settings for Gmail and Outlook OAuth client IDs and secrets
@@ -191,9 +187,12 @@ class TestMailOAuth(
                 ).exists(),
             )
 
-            self.assertIn("Error getting access token: test_error", cm.output[0])
+            self.assertIn(
+                "Error getting access token from OAuth provider",
+                cm.output[0],
+            )
 
-    def test_oauth_callback_view_insufficient_permissions(self):
+    def test_oauth_callback_view_insufficient_permissions(self) -> None:
         """
         GIVEN:
             - Mocked settings for Gmail and Outlook OAuth client IDs and secrets
@@ -223,7 +222,7 @@ class TestMailOAuth(
             MailAccount.objects.filter(imap_server="outlook.office365.com").exists(),
         )
 
-    def test_oauth_callback_view_no_code(self):
+    def test_oauth_callback_view_no_code(self) -> None:
         """
         GIVEN:
             - Mocked settings for Gmail and Outlook OAuth client IDs and secrets
@@ -244,7 +243,7 @@ class TestMailOAuth(
             MailAccount.objects.filter(imap_server="outlook.office365.com").exists(),
         )
 
-    def test_oauth_callback_view_invalid_state(self):
+    def test_oauth_callback_view_invalid_state(self) -> None:
         """
         GIVEN:
             - Mocked settings for Gmail and Outlook OAuth client IDs and secrets
@@ -265,6 +264,28 @@ class TestMailOAuth(
             MailAccount.objects.filter(imap_server="outlook.office365.com").exists(),
         )
 
+    def test_oauth_callback_view_unrecognized_scope(self) -> None:
+        """
+        GIVEN:
+            - A valid OAuth state and a callback scope that is not Google's
+        WHEN:
+            - OAuth callback is called
+        THEN:
+            - 400 is returned instead of a server error and no account is created
+        """
+        session = self.client.session
+        session["oauth_state"] = "test_state"
+        session.save()
+
+        for scope in ("", "openid", "https://example.com/other"):
+            with self.subTest(scope=scope):
+                response = self.client.get(
+                    "/api/oauth/callback/",
+                    {"code": "test_code", "scope": scope, "state": "test_state"},
+                )
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertFalse(MailAccount.objects.exists())
+
     @mock.patch("paperless_mail.mail.get_mailbox")
     @mock.patch(
         "httpx_oauth.oauth2.BaseOAuth2.refresh_token",
@@ -273,7 +294,7 @@ class TestMailOAuth(
         self,
         mock_refresh_token,
         mock_get_mailbox,
-    ):
+    ) -> None:
         """
         GIVEN:
             - Mail account with refresh token and expiration
@@ -286,11 +307,9 @@ class TestMailOAuth(
         mock_mailbox = mock.MagicMock()
         mock_get_mailbox.return_value.__enter__.return_value = mock_mailbox
 
-        mail_account = MailAccount.objects.create(
+        mail_account = MailAccountFactory(
             name="Test Gmail Mail Account",
             username="test_username",
-            imap_security=MailAccount.ImapSecurity.SSL,
-            imap_port=993,
             account_type=MailAccount.MailAccountType.GMAIL_OAUTH,
             is_token=True,
             refresh_token="test_refresh_token",
@@ -312,11 +331,9 @@ class TestMailOAuth(
             "refresh_token": "test_refresh",
             "expires_in": 3600,
         }
-        outlook_mail_account = MailAccount.objects.create(
+        outlook_mail_account = MailAccountFactory(
             name="Test Outlook Mail Account",
             username="test_username",
-            imap_security=MailAccount.ImapSecurity.SSL,
-            imap_port=993,
             account_type=MailAccount.MailAccountType.OUTLOOK_OAUTH,
             is_token=True,
             refresh_token="test_refresh_token",
@@ -334,7 +351,7 @@ class TestMailOAuth(
         self,
         mock_refresh_token,
         mock_get_mailbox,
-    ):
+    ) -> None:
         """
         GIVEN:
             - Mail account with refresh token and expiration
@@ -349,11 +366,9 @@ class TestMailOAuth(
         mock_mailbox = mock.MagicMock()
         mock_get_mailbox.return_value.__enter__.return_value = mock_mailbox
 
-        mail_account = MailAccount.objects.create(
+        mail_account = MailAccountFactory(
             name="Test Gmail Mail Account",
             username="test_username",
-            imap_security=MailAccount.ImapSecurity.SSL,
-            imap_port=993,
             account_type=MailAccount.MailAccountType.GMAIL_OAUTH,
             is_token=True,
             refresh_token="test_refresh_token",
@@ -373,3 +388,39 @@ class TestMailOAuth(
                 f"Failed to refresh oauth token for account {mail_account}: test_error",
                 cm.output[0],
             )
+
+    def test_refresh_account_oauth_token_non_oauth_account(self) -> None:
+        """
+        GIVEN:
+            - A mail account which does not use OAuth
+        WHEN:
+            - A token refresh is requested
+        THEN:
+            - False is returned rather than an unbound variable error
+        """
+        account = MailAccountFactory(
+            account_type=MailAccount.MailAccountType.IMAP,
+            refresh_token="token",
+        )
+
+        self.assertFalse(
+            PaperlessMailOAuth2Manager().refresh_account_oauth_token(account),
+        )
+
+    def test_refresh_account_oauth_token_without_refresh_token(self) -> None:
+        """
+        GIVEN:
+            - An OAuth mail account with no refresh token stored
+        WHEN:
+            - A token refresh is requested
+        THEN:
+            - False is returned
+        """
+        account = MailAccountFactory(
+            account_type=MailAccount.MailAccountType.GMAIL_OAUTH,
+            refresh_token=None,
+        )
+
+        self.assertFalse(
+            PaperlessMailOAuth2Manager().refresh_account_oauth_token(account),
+        )

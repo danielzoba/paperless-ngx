@@ -1,27 +1,37 @@
 import json
 
 from django.contrib.auth.models import Permission
-from django.contrib.auth.models import User
 from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from documents.tests.utils import DirectoriesMixin
 from paperless.version import __full_version_str__
+from paperless_testing.dirs import DirectoriesMixin
+from paperless_testing.factories import UserFactory
 
 
 class TestApiUiSettings(DirectoriesMixin, APITestCase):
     ENDPOINT = "/api/ui_settings/"
 
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
-        self.test_user = User.objects.create_superuser(username="test")
+        self.test_user = UserFactory(username="test", superuser=True)
         self.test_user.first_name = "Test"
         self.test_user.last_name = "User"
         self.test_user.save()
         self.client.force_authenticate(user=self.test_user)
 
-    def test_api_get_ui_settings(self):
+    @override_settings(
+        APP_TITLE=None,
+        APP_LOGO=None,
+        AUDIT_LOG_ENABLED=True,
+        EMPTY_TRASH_DELAY=30,
+        ENABLE_UPDATE_CHECK="default",
+        EMAIL_ENABLED=False,
+        GMAIL_OAUTH_ENABLED=False,
+        OUTLOOK_OAUTH_ENABLED=False,
+    )
+    def test_api_get_ui_settings(self) -> None:
         response = self.client.get(self.ENDPOINT, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.maxDiff = None
@@ -49,10 +59,15 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
                     "backend_setting": "default",
                 },
                 "email_enabled": False,
+                "ai_enabled": False,
+                "remote_ocr": {
+                    "configured": False,
+                    "mode": "always",
+                },
             },
         )
 
-    def test_api_set_ui_settings(self):
+    def test_api_set_ui_settings(self) -> None:
         settings = {
             "settings": {
                 "dark_mode": {
@@ -75,8 +90,8 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
             settings["settings"],
         )
 
-    def test_api_set_ui_settings_insufficient_global_permissions(self):
-        not_superuser = User.objects.create_user(username="test_not_superuser")
+    def test_api_set_ui_settings_insufficient_global_permissions(self) -> None:
+        not_superuser = UserFactory(username="test_not_superuser")
         self.client.force_authenticate(user=not_superuser)
 
         settings = {
@@ -95,8 +110,8 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_api_set_ui_settings_sufficient_global_permissions(self):
-        not_superuser = User.objects.create_user(username="test_not_superuser")
+    def test_api_set_ui_settings_sufficient_global_permissions(self) -> None:
+        not_superuser = UserFactory(username="test_not_superuser")
         not_superuser.user_permissions.add(
             *Permission.objects.filter(codename__contains="uisettings"),
         )
@@ -119,7 +134,7 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    def test_settings_must_be_dict(self):
+    def test_settings_must_be_dict(self) -> None:
         """
         GIVEN:
             - API request to update ui_settings with settings not being a dict
@@ -144,6 +159,50 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
         )
 
     @override_settings(
+        REMOTE_OCR_ENGINE="azureai",
+        REMOTE_OCR_API_KEY="somekey",
+        REMOTE_OCR_ENDPOINT="https://example.cognitiveservices.azure.com",
+        REMOTE_OCR_MODE="workflow_only",
+    )
+    def test_settings_reports_remote_ocr_when_configured(self) -> None:
+        """
+        GIVEN:
+            - A fully configured remote OCR engine in workflow_only mode
+        WHEN:
+            - The ui_settings endpoint is called
+        THEN:
+            - The UI is told remote OCR is available and selective, so it can
+              offer it where it would actually change something
+        """
+        response = self.client.get(self.ENDPOINT, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["settings"]["remote_ocr"],
+            {"configured": True, "mode": "workflow_only"},
+        )
+
+    @override_settings(
+        REMOTE_OCR_ENGINE="azureai",
+        REMOTE_OCR_API_KEY=None,
+        REMOTE_OCR_ENDPOINT=None,
+    )
+    def test_settings_reports_remote_ocr_incompletely_configured(self) -> None:
+        """
+        GIVEN:
+            - An engine named but missing its endpoint and API key
+        WHEN:
+            - The ui_settings endpoint is called
+        THEN:
+            - It is reported as not configured, matching what the parser
+              registry will actually do
+        """
+        response = self.client.get(self.ENDPOINT, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["settings"]["remote_ocr"]["configured"])
+
+    @override_settings(
         OAUTH_CALLBACK_BASE_URL="http://localhost:8000",
         GMAIL_OAUTH_CLIENT_ID="abc123",
         GMAIL_OAUTH_CLIENT_SECRET="def456",
@@ -152,7 +211,7 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
         OUTLOOK_OAUTH_CLIENT_SECRET="jkl012",
         OUTLOOK_OAUTH_ENABLED=True,
     )
-    def test_settings_includes_oauth_urls_if_enabled(self):
+    def test_settings_includes_oauth_urls_if_enabled(self) -> None:
         response = self.client.get(self.ENDPOINT, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIsNotNone(

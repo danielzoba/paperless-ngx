@@ -1,9 +1,16 @@
 import dataclasses
 import json
+from typing import Any
 
 from django.conf import settings
 
 from paperless.models import ApplicationConfiguration
+from paperless.models import ArchiveFileGenerationChoices
+from paperless.models import CleanChoices
+from paperless.models import ColorConvertChoices
+from paperless.models import ModeChoices
+from paperless.models import OutputTypeChoices
+from paperless.models import RemoteOCRMode
 
 
 @dataclasses.dataclass
@@ -28,12 +35,14 @@ class OutputTypeConfig(BaseConfig):
     Almost all parsers care about the chosen PDF output format
     """
 
-    output_type: str = dataclasses.field(init=False)
+    output_type: OutputTypeChoices = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
         app_config = self._get_config_instance()
 
-        self.output_type = app_config.output_type or settings.OCR_OUTPUT_TYPE
+        self.output_type = app_config.output_type or OutputTypeChoices(
+            settings.OCR_OUTPUT_TYPE,
+        )
 
 
 @dataclasses.dataclass
@@ -45,15 +54,17 @@ class OcrConfig(OutputTypeConfig):
 
     pages: int | None = dataclasses.field(init=False)
     language: str = dataclasses.field(init=False)
-    mode: str = dataclasses.field(init=False)
-    skip_archive_file: str = dataclasses.field(init=False)
+    mode: ModeChoices = dataclasses.field(init=False)
+    archive_file_generation: ArchiveFileGenerationChoices = dataclasses.field(
+        init=False,
+    )
     image_dpi: int | None = dataclasses.field(init=False)
-    clean: str = dataclasses.field(init=False)
+    clean: CleanChoices = dataclasses.field(init=False)
     deskew: bool = dataclasses.field(init=False)
     rotate: bool = dataclasses.field(init=False)
     rotate_threshold: float = dataclasses.field(init=False)
     max_image_pixel: float | None = dataclasses.field(init=False)
-    color_conversion_strategy: str = dataclasses.field(init=False)
+    color_conversion_strategy: ColorConvertChoices = dataclasses.field(init=False)
     user_args: dict[str, str] | None = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
@@ -63,12 +74,13 @@ class OcrConfig(OutputTypeConfig):
 
         self.pages = app_config.pages or settings.OCR_PAGES
         self.language = app_config.language or settings.OCR_LANGUAGE
-        self.mode = app_config.mode or settings.OCR_MODE
-        self.skip_archive_file = (
-            app_config.skip_archive_file or settings.OCR_SKIP_ARCHIVE_FILE
+        self.mode = app_config.mode or ModeChoices(settings.OCR_MODE)
+        self.archive_file_generation = (
+            app_config.archive_file_generation
+            or ArchiveFileGenerationChoices(settings.ARCHIVE_FILE_GENERATION)
         )
         self.image_dpi = app_config.image_dpi or settings.OCR_IMAGE_DPI
-        self.clean = app_config.unpaper_clean or settings.OCR_CLEAN
+        self.clean = app_config.unpaper_clean or CleanChoices(settings.OCR_CLEAN)
         self.deskew = (
             app_config.deskew if app_config.deskew is not None else settings.OCR_DESKEW
         )
@@ -85,7 +97,7 @@ class OcrConfig(OutputTypeConfig):
         )
         self.color_conversion_strategy = (
             app_config.color_conversion_strategy
-            or settings.OCR_COLOR_CONVERSION_STRATEGY
+            or ColorConvertChoices(settings.OCR_COLOR_CONVERSION_STRATEGY)
         )
 
         user_args = None
@@ -116,26 +128,34 @@ class BarcodeConfig(BaseConfig):
     barcode_max_pages: int = dataclasses.field(init=False)
     barcode_enable_tag: bool = dataclasses.field(init=False)
     barcode_tag_mapping: dict[str, str] = dataclasses.field(init=False)
+    barcode_tag_split: bool = dataclasses.field(init=False)
+    barcode_store_values: bool = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
         app_config = self._get_config_instance()
 
         self.barcodes_enabled = (
-            app_config.barcodes_enabled or settings.CONSUMER_ENABLE_BARCODES
+            app_config.barcodes_enabled
+            if app_config.barcodes_enabled is not None
+            else settings.CONSUMER_ENABLE_BARCODES
         )
         self.barcode_enable_tiff_support = (
             app_config.barcode_enable_tiff_support
-            or settings.CONSUMER_BARCODE_TIFF_SUPPORT
+            if app_config.barcode_enable_tiff_support is not None
+            else settings.CONSUMER_BARCODE_TIFF_SUPPORT
         )
         self.barcode_string = (
             app_config.barcode_string or settings.CONSUMER_BARCODE_STRING
         )
         self.barcode_retain_split_pages = (
             app_config.barcode_retain_split_pages
-            or settings.CONSUMER_BARCODE_RETAIN_SPLIT_PAGES
+            if app_config.barcode_retain_split_pages is not None
+            else settings.CONSUMER_BARCODE_RETAIN_SPLIT_PAGES
         )
         self.barcode_enable_asn = (
-            app_config.barcode_enable_asn or settings.CONSUMER_ENABLE_ASN_BARCODE
+            app_config.barcode_enable_asn
+            if app_config.barcode_enable_asn is not None
+            else settings.CONSUMER_ENABLE_ASN_BARCODE
         )
         self.barcode_asn_prefix = (
             app_config.barcode_asn_prefix or settings.CONSUMER_ASN_BARCODE_PREFIX
@@ -148,10 +168,22 @@ class BarcodeConfig(BaseConfig):
             app_config.barcode_max_pages or settings.CONSUMER_BARCODE_MAX_PAGES
         )
         self.barcode_enable_tag = (
-            app_config.barcode_enable_tag or settings.CONSUMER_ENABLE_TAG_BARCODE
+            app_config.barcode_enable_tag
+            if app_config.barcode_enable_tag is not None
+            else settings.CONSUMER_ENABLE_TAG_BARCODE
         )
         self.barcode_tag_mapping = (
             app_config.barcode_tag_mapping or settings.CONSUMER_TAG_BARCODE_MAPPING
+        )
+        self.barcode_tag_split = (
+            app_config.barcode_tag_split
+            if app_config.barcode_tag_split is not None
+            else settings.CONSUMER_TAG_BARCODE_SPLIT
+        )
+        self.barcode_store_values = (
+            app_config.barcode_store_values
+            if app_config.barcode_store_values is not None
+            else settings.CONSUMER_STORE_BARCODE_VALUES
         )
 
 
@@ -169,3 +201,106 @@ class GeneralConfig(BaseConfig):
 
         self.app_title = app_config.app_title or None
         self.app_logo = app_config.app_logo.url if app_config.app_logo else None
+
+
+@dataclasses.dataclass
+class RemoteOCRConfig(BaseConfig):
+    """
+    Settings for the remote (cloud) OCR parser
+    """
+
+    remote_ocr_engine: str | None = dataclasses.field(init=False)
+    remote_ocr_api_key: str | None = dataclasses.field(init=False)
+    remote_ocr_endpoint: str | None = dataclasses.field(init=False)
+    remote_ocr_mode: RemoteOCRMode = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        app_config = self._get_config_instance()
+
+        self.remote_ocr_engine = (
+            app_config.remote_ocr_engine or settings.REMOTE_OCR_ENGINE
+        )
+        self.remote_ocr_api_key = (
+            app_config.remote_ocr_api_key or settings.REMOTE_OCR_API_KEY
+        )
+        self.remote_ocr_endpoint = (
+            app_config.remote_ocr_endpoint or settings.REMOTE_OCR_ENDPOINT
+        )
+        self.remote_ocr_mode = app_config.remote_ocr_mode or RemoteOCRMode(
+            settings.REMOTE_OCR_MODE,
+        )
+
+    @property
+    def remote_ocr_by_default(self) -> bool:
+        """
+        Whether every supported document goes to the remote engine.
+
+        When False the remote engine is used only for documents that
+        explicitly asked for it, i.e. a workflow matched during consumption or
+        the user ticked the box when reprocessing.
+        """
+        return self.remote_ocr_mode == RemoteOCRMode.ALWAYS
+
+
+@dataclasses.dataclass
+class AIConfig(BaseConfig):
+    """
+    AI related settings that require global scope
+    """
+
+    ai_enabled: bool = dataclasses.field(init=False)
+    llm_embedding_backend: str = dataclasses.field(init=False)
+    llm_embedding_model: str = dataclasses.field(init=False)
+    llm_embedding_api_key: str = dataclasses.field(init=False)
+    llm_embedding_endpoint: str = dataclasses.field(init=False)
+    llm_embedding_chunk_size: int = dataclasses.field(init=False)
+    llm_context_size: int = dataclasses.field(init=False)
+    llm_request_timeout: int = dataclasses.field(init=False)
+    llm_backend: str = dataclasses.field(init=False)
+    llm_model: str = dataclasses.field(init=False)
+    llm_api_key: str = dataclasses.field(init=False)
+    llm_endpoint: str = dataclasses.field(init=False)
+    llm_output_language: str = dataclasses.field(init=False)
+    llm_allow_internal_endpoints: bool = dataclasses.field(init=False)
+    llm_extra_params: dict[str, Any] = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        app_config = self._get_config_instance()
+
+        self.ai_enabled = (
+            app_config.ai_enabled
+            if app_config.ai_enabled is not None
+            else settings.AI_ENABLED
+        )
+        self.llm_embedding_backend = (
+            app_config.llm_embedding_backend or settings.LLM_EMBEDDING_BACKEND
+        )
+        self.llm_embedding_model = (
+            app_config.llm_embedding_model or settings.LLM_EMBEDDING_MODEL
+        )
+        self.llm_embedding_api_key = (
+            app_config.llm_embedding_api_key or settings.LLM_EMBEDDING_API_KEY
+        )
+        self.llm_embedding_endpoint = (
+            app_config.llm_embedding_endpoint or settings.LLM_EMBEDDING_ENDPOINT
+        )
+        self.llm_embedding_chunk_size = (
+            app_config.llm_embedding_chunk_size or settings.LLM_EMBEDDING_CHUNK_SIZE
+        )
+        self.llm_context_size = app_config.llm_context_size or settings.LLM_CONTEXT_SIZE
+        self.llm_request_timeout = (
+            app_config.llm_request_timeout or settings.LLM_REQUEST_TIMEOUT
+        )
+        self.llm_backend = app_config.llm_backend or settings.LLM_BACKEND
+        self.llm_model = app_config.llm_model or settings.LLM_MODEL
+        self.llm_api_key = app_config.llm_api_key or settings.LLM_API_KEY
+        self.llm_endpoint = app_config.llm_endpoint or settings.LLM_ENDPOINT
+        self.llm_output_language = (
+            app_config.llm_output_language or settings.LLM_OUTPUT_LANGUAGE
+        )
+        self.llm_allow_internal_endpoints = settings.LLM_ALLOW_INTERNAL_ENDPOINTS
+        self.llm_extra_params = settings.LLM_EXTRA_PARAMS
+
+    @property
+    def llm_index_enabled(self) -> bool:
+        return bool(self.ai_enabled and self.llm_embedding_backend)

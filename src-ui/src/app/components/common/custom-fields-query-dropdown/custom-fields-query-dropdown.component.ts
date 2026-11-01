@@ -1,11 +1,19 @@
-import { NgTemplateOutlet } from '@angular/common'
+import { _IdGenerator } from '@angular/cdk/a11y'
+import {
+  getLocaleNumberSymbol,
+  NgClass,
+  NgTemplateOutlet,
+  NumberSymbol,
+} from '@angular/common'
 import {
   Component,
   EventEmitter,
   inject,
   Input,
+  LOCALE_ID,
   Output,
   QueryList,
+  signal,
   ViewChild,
   ViewChildren,
 } from '@angular/core'
@@ -36,30 +44,52 @@ import {
   CustomFieldQueryExpression,
 } from 'src/app/utils/custom-field-query-element'
 import { pngxPopperOptions } from 'src/app/utils/popper-options'
+import { matchesSearchText } from 'src/app/utils/text-search'
 import { LoadingComponentWithPermissions } from '../../loading-component/loading.component'
 import { ClearableBadgeComponent } from '../clearable-badge/clearable-badge.component'
 import { DocumentLinkComponent } from '../input/document-link/document-link.component'
 
+interface RelativeDate {
+  // The expression sent to the API, with {n} standing in for the amount
+  amount: number | null
+  unit: string
+}
+
+function parseRelativeDate(
+  value: string,
+  unit: string
+): RelativeDate | undefined {
+  const [prefix, suffix] = unit.split('{n}')
+  if (suffix === undefined) {
+    return value === unit ? { amount: null, unit } : undefined
+  }
+  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return undefined
+  const amount = value.slice(prefix.length, value.length - suffix.length)
+  if (!amount || !Number.isInteger(+amount) || +amount < 0) return undefined
+  return { amount: +amount, unit }
+}
+
 export class CustomFieldQueriesModel {
-  private _queries: CustomFieldQueryElement[] = []
+  private readonly _queries = signal<CustomFieldQueryElement[]>([])
   private rootSubscriptions: Subscription[] = []
 
   public readonly changed = new Subject<CustomFieldQueriesModel>()
 
   public get queries(): CustomFieldQueryElement[] {
-    return this._queries
+    return this._queries()
   }
 
   public set queries(value: CustomFieldQueryElement[]) {
     this.teardownRootSubscriptions()
-    this._queries = value ?? []
-    for (const element of this._queries) {
+    const queries = value ?? []
+    for (const element of queries) {
       this.rootSubscriptions.push(
         element.changed.subscribe(() => {
           this.changed.next(this)
         })
       )
     }
+    this._queries.set(queries)
   }
 
   public clear(fireEvent = true) {
@@ -202,6 +232,7 @@ export class CustomFieldQueriesModel {
     DocumentLinkComponent,
     ReactiveFormsModule,
     NgbDatepickerModule,
+    NgClass,
     NgTemplateOutlet,
     NgSelectModule,
     NgxBootstrapIconsModule,
@@ -210,6 +241,7 @@ export class CustomFieldQueriesModel {
 })
 export class CustomFieldsQueryDropdownComponent extends LoadingComponentWithPermissions {
   protected customFieldsService = inject(CustomFieldsService)
+  private readonly locale = inject(LOCALE_ID)
 
   public CustomFieldQueryComponentType = CustomFieldQueryElementType
   public CustomFieldQueryOperator = CustomFieldQueryOperator
@@ -238,6 +270,18 @@ export class CustomFieldsQueryDropdownComponent extends LoadingComponentWithPerm
 
   @Input()
   useDropdown: boolean = true
+
+  private readonly idGenerator = inject(_IdGenerator)
+  public readonly dropdownMenuId = this.idGenerator.getId(
+    'pngx-custom-fields-query-dropdown-'
+  )
+
+  /**
+   * Keep ng-select dropdown panels inside the dropdown menu
+   */
+  get selectAppendTo(): string {
+    return this.useDropdown ? `#${this.dropdownMenuId}` : null
+  }
 
   get name(): string {
     return this.title ? this.title.replace(/\s/g, '_').toLowerCase() : null
@@ -277,9 +321,78 @@ export class CustomFieldsQueryDropdownComponent extends LoadingComponentWithPerm
   @Output()
   selectionModelChange = new EventEmitter<CustomFieldQueriesModel>()
 
-  customFields: CustomField[] = []
+  readonly customFields = signal<CustomField[]>([])
 
   public readonly today: string = new Date().toLocaleDateString('en-CA')
+
+  public readonly relativeDateUnits = [
+    { id: 'today', label: $localize`Today` },
+    { id: '{n} days ago', label: $localize`days ago` },
+    { id: '{n} weeks ago', label: $localize`weeks ago` },
+    { id: '{n} months ago', label: $localize`months ago` },
+    { id: '{n} years ago', label: $localize`years ago` },
+    { id: 'in {n} days', label: $localize`days from now` },
+    { id: 'in {n} weeks', label: $localize`weeks from now` },
+    { id: 'in {n} months', label: $localize`months from now` },
+    { id: 'in {n} years', label: $localize`years from now` },
+  ]
+
+  private readonly relativeDates = new Map<string, RelativeDate>()
+
+  getRelativeDate(atom: CustomFieldQueryAtom): RelativeDate | undefined {
+    if (!this.relativeDates.has(atom.id) && typeof atom.value === 'string') {
+      for (const { id } of this.relativeDateUnits) {
+        const relativeDate = parseRelativeDate(atom.value, id)
+        if (relativeDate) {
+          this.relativeDates.set(atom.id, relativeDate)
+          break
+        }
+      }
+    }
+    return this.relativeDates.get(atom.id)
+  }
+
+  hasDateValueRow(atom: CustomFieldQueryAtom): boolean {
+    return (
+      this.getCustomFieldByID(atom.field)?.data_type ===
+        CustomFieldDataType.Date &&
+      atom.operator !== CustomFieldQueryOperator.Exists &&
+      atom.operator !== CustomFieldQueryOperator.IsNull
+    )
+  }
+
+  toggleRelativeDate(atom: CustomFieldQueryAtom) {
+    if (this.getRelativeDate(atom)) {
+      this.relativeDates.delete(atom.id)
+      atom.value = null
+    } else {
+      this.relativeDates.set(atom.id, { amount: null, unit: '{n} days ago' })
+      this.updateRelativeDate(atom, {})
+    }
+  }
+
+  updateRelativeDate(
+    atom: CustomFieldQueryAtom,
+    change: Partial<RelativeDate>
+  ) {
+    const { amount, unit } = Object.assign(
+      this.relativeDates.get(atom.id),
+      change
+    )
+    if (!unit.includes('{n}')) {
+      atom.value = unit
+    } else {
+      atom.value = amount === null ? null : unit.replace('{n}', `${amount}`)
+    }
+  }
+
+  public customFieldSearchFn = (term: string, field: CustomField): boolean =>
+    matchesSearchText(field?.name, term)
+
+  public selectOptionSearchFn = (
+    term: string,
+    option: { id: string; label: string }
+  ): boolean => matchesSearchText(option?.label, term)
 
   constructor() {
     super()
@@ -316,12 +429,12 @@ export class CustomFieldsQueryDropdownComponent extends LoadingComponentWithPerm
       .listAll()
       .pipe(first(), takeUntil(this.unsubscribeNotifier))
       .subscribe((result) => {
-        this.customFields = result.results
+        this.customFields.set(result.results)
       })
   }
 
   public getCustomFieldByID(id: number): CustomField {
-    return this.customFields.find((field) => field.id === id)
+    return this.customFields().find((field) => field.id === id)
   }
 
   public addAtom(expression: CustomFieldQueryExpression) {
@@ -344,7 +457,7 @@ export class CustomFieldsQueryDropdownComponent extends LoadingComponentWithPerm
   getOperatorsForField(
     fieldID: number
   ): Array<{ value: string; label: string }> {
-    const field = this.customFields.find((field) => field.id === fieldID)
+    const field = this.customFields().find((field) => field.id === fieldID)
     const groups: CustomFieldQueryOperatorGroups[] = field
       ? CUSTOM_FIELD_QUERY_OPERATOR_GROUPS_BY_TYPE[field.data_type]
       : [CustomFieldQueryOperatorGroups.Basic]
@@ -360,10 +473,24 @@ export class CustomFieldsQueryDropdownComponent extends LoadingComponentWithPerm
   getSelectOptionsForField(
     fieldID: number
   ): Array<{ label: string; id: string }> {
-    const field = this.customFields.find((field) => field.id === fieldID)
+    const field = this.customFields().find((field) => field.id === fieldID)
     if (field) {
       return field.extra_data['select_options']
     }
     return []
+  }
+
+  setMonetaryValue(atom: CustomFieldQueryAtom, value: string) {
+    // Normalize the decimal symbol e.g. . vs , by locale
+    const decimalSymbol = getLocaleNumberSymbol(
+      this.locale,
+      NumberSymbol.Decimal
+    )
+    if (decimalSymbol !== '.' && value.includes(decimalSymbol)) {
+      const groupSymbol = getLocaleNumberSymbol(this.locale, NumberSymbol.Group)
+      value = value.split(groupSymbol).join('').split(decimalSymbol).join('.')
+    }
+
+    atom.value = value
   }
 }

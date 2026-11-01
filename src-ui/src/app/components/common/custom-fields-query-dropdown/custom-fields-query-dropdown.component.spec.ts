@@ -1,13 +1,9 @@
 import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import { provideHttpClientTesting } from '@angular/common/http/testing'
-import {
-  ComponentFixture,
-  fakeAsync,
-  TestBed,
-  tick,
-} from '@angular/core/testing'
+import { LOCALE_ID } from '@angular/core'
+import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { FormsModule, ReactiveFormsModule } from '@angular/forms'
-import { NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap'
+import { NgbDateAdapter, NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap'
 import { NgSelectModule } from '@ng-select/ng-select'
 import { allIcons, NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { of } from 'rxjs'
@@ -15,6 +11,7 @@ import { CustomField, CustomFieldDataType } from 'src/app/data/custom-field'
 import {
   CUSTOM_FIELD_QUERY_OPERATORS_BY_GROUP,
   CustomFieldQueryLogicalOperator,
+  CustomFieldQueryOperator,
   CustomFieldQueryOperatorGroups,
 } from 'src/app/data/custom-field-query'
 import { CustomFieldsService } from 'src/app/services/rest/custom-fields.service'
@@ -23,6 +20,7 @@ import {
   CustomFieldQueryElement,
   CustomFieldQueryExpression,
 } from 'src/app/utils/custom-field-query-element'
+import { ISODateAdapter } from 'src/app/utils/ngb-iso-date-adapter'
 import {
   CustomFieldQueriesModel,
   CustomFieldsQueryDropdownComponent,
@@ -46,6 +44,18 @@ const customFields = [
       ],
     },
   },
+  {
+    id: 3,
+    name: 'Test Monetary Field',
+    data_type: CustomFieldDataType.Monetary,
+    extra_data: { default_currency: 'EUR' },
+  },
+  {
+    id: 4,
+    name: 'Test Date Field',
+    data_type: CustomFieldDataType.Date,
+    extra_data: {},
+  },
 ]
 
 describe('CustomFieldsQueryDropdownComponent', () => {
@@ -66,6 +76,8 @@ describe('CustomFieldsQueryDropdownComponent', () => {
       providers: [
         provideHttpClient(withInterceptorsFromDi()),
         provideHttpClientTesting(),
+        { provide: LOCALE_ID, useValue: 'de' },
+        { provide: NgbDateAdapter, useClass: ISODateAdapter },
       ],
     }).compileComponents()
 
@@ -84,7 +96,7 @@ describe('CustomFieldsQueryDropdownComponent', () => {
   })
 
   it('should initialize custom fields on creation', () => {
-    expect(component.customFields).toEqual(customFields)
+    expect(component.customFields()).toEqual(customFields)
   })
 
   it('should add an expression when opened if queries are empty', () => {
@@ -106,7 +118,7 @@ describe('CustomFieldsQueryDropdownComponent', () => {
       data_type: CustomFieldDataType.String,
       extra_data: {},
     }
-    component.customFields = [field]
+    component.customFields.set([field])
     const operators = component.getOperatorsForField(1)
     expect(operators.length).toEqual(
       [
@@ -143,7 +155,7 @@ describe('CustomFieldsQueryDropdownComponent', () => {
         ],
       },
     }
-    component.customFields = [field]
+    component.customFields.set([field])
     const options = component.getSelectOptionsForField(1)
     expect(options).toEqual([
       { label: 'Option 1', id: 'abc-123' },
@@ -153,6 +165,22 @@ describe('CustomFieldsQueryDropdownComponent', () => {
     // Fallback to empty array if field is not found
     const options2 = component.getSelectOptionsForField(2)
     expect(options2).toEqual([])
+  })
+
+  it('should normalize localized monetary comparison values', () => {
+    const atom = new CustomFieldQueryAtom([3, 'exact', null])
+
+    component.setMonetaryValue(atom, '1.234,56')
+
+    expect(atom.value).toEqual('1234.56')
+  })
+
+  it('should preserve API-formatted monetary comparison values', () => {
+    const atom = new CustomFieldQueryAtom([3, 'exact', null])
+
+    component.setMonetaryValue(atom, '1234.56')
+
+    expect(atom.value).toEqual('1234.56')
   })
 
   it('should remove an element from the selection model', () => {
@@ -210,14 +238,81 @@ describe('CustomFieldsQueryDropdownComponent', () => {
     expect(component.name).toBe('test_title')
   })
 
-  it('should add a default atom on open and focus the select field', fakeAsync(() => {
+  it('should add a default atom on open', async () => {
     expect(component.selectionModel.queries.length).toBe(0)
     component.onOpenChange(true)
     fixture.detectChanges()
-    tick()
+    await fixture.whenStable()
     expect(component.selectionModel.queries.length).toBe(1)
-    expect(window.document.activeElement.tagName).toBe('INPUT')
-  }))
+  })
+
+  it('should build relative date values from amount and unit', async () => {
+    component.useDropdown = false
+    const atom = new CustomFieldQueryAtom([
+      4,
+      CustomFieldQueryOperator.GreaterThanOrEqual,
+      '2026-10-22',
+    ])
+    component.selectionModel.addAtom(atom)
+    fixture.detectChanges()
+    await fixture.whenStable()
+    const query = (selector: string) =>
+      fixture.nativeElement.querySelector(selector)
+    expect(query('[ngbDatepicker]')).not.toBeNull()
+    expect(query('input[id$="_fixed"]').checked).toBe(true)
+
+    query('input[id$="_relative"]').click()
+    fixture.detectChanges()
+    await fixture.whenStable()
+    expect(atom.value).toBeNull()
+    const amount: HTMLInputElement = query('input[aria-label="Amount"]')
+    const unit: HTMLSelectElement = query('select[id$="_unit"]')
+    amount.value = '30'
+    amount.dispatchEvent(new Event('input'))
+    expect(atom.serialize()).toEqual([4, 'gte', '30 days ago'])
+    unit.selectedIndex = 6
+    unit.dispatchEvent(new Event('change'))
+    expect(atom.serialize()).toEqual([4, 'gte', 'in 30 weeks'])
+    unit.selectedIndex = 0
+    unit.dispatchEvent(new Event('change'))
+    fixture.detectChanges()
+    expect(atom.serialize()).toEqual([4, 'gte', 'today'])
+    expect(query('input[aria-label="Amount"]')).toBeNull()
+
+    query('input[id$="_fixed"]').click()
+    fixture.detectChanges()
+    expect(atom.value).toBeNull()
+    expect(query('[ngbDatepicker]')).not.toBeNull()
+  })
+
+  it('should restore a saved relative date value', async () => {
+    component.useDropdown = false
+    const atom = new CustomFieldQueryAtom([
+      4,
+      CustomFieldQueryOperator.Exact,
+      'in 2 months',
+    ])
+    component.selectionModel.addAtom(atom)
+    fixture.detectChanges()
+    await fixture.whenStable()
+    expect(component.getRelativeDate(atom)).toEqual({
+      amount: 2,
+      unit: 'in {n} months',
+    })
+    expect(
+      fixture.nativeElement.querySelector('input[aria-label="Amount"]').value
+    ).toBe('2')
+
+    const today = new CustomFieldQueryAtom([
+      4,
+      CustomFieldQueryOperator.Exact,
+      'today',
+    ])
+    expect(component.getRelativeDate(today)).toEqual({
+      amount: null,
+      unit: 'today',
+    })
+  })
 
   describe('CustomFieldQueriesModel', () => {
     let model: CustomFieldQueriesModel

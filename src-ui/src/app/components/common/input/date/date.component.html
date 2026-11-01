@@ -4,7 +4,7 @@
       <label class="form-label" [class.mb-md-0]="horizontal" [for]="inputId">{{title}}</label>
       @if (removable) {
         <button type="button" class="btn btn-sm btn-danger position-absolute left-0" (click)="removed.emit(this)">
-          <i-bs name="x"></i-bs>&nbsp;<ng-container i18n>Remove</ng-container>
+          <i-bs name="x" class="me-1"></i-bs><ng-container i18n>Remove</ng-container>
           </button>
         }
       </div>
@@ -12,8 +12,8 @@
         <div class="input-group" [class.is-invalid]="error">
           <input #inputField class="form-control" [class.is-invalid]="error" [placeholder]="placeholder" [id]="inputId" maxlength="10"
             (dateSelect)="onChange(value)" (change)="onChange(value)" (keypress)="onKeyPress($event)" (paste)="onPaste($event)"
-            name="dp" [(ngModel)]="value" ngbDatepicker #datePicker="ngbDatepicker" #datePickerContent="ngModel" [disabled]="disabled" [footerTemplate]="datePickerFooterTemplate">
-          <button class="btn btn-outline-secondary calendar" (click)="datePicker.toggle()" type="button" [disabled]="disabled">
+            name="dp" [(ngModel)]="value" [ngModelOptions]="{standalone: true}" ngbDatepicker #datePicker="ngbDatepicker" #datePickerContent="ngModel" [disabled]="disabled" [footerTemplate]="datePickerFooterTemplate">
+          <button class="btn btn-outline-secondary calendar" (click)="datePicker.toggle()" type="button" [disabled]="disabled" aria-label="Open date picker" i18n-aria-label>
             <i-bs width="1.2em" height="1.2em" name="calendar"></i-bs>
           </button>
           <ng-template #datePickerFooterTemplate>

@@ -4,12 +4,7 @@ import {
   provideHttpClientTesting,
 } from '@angular/common/http/testing'
 import { Component } from '@angular/core'
-import {
-  ComponentFixture,
-  TestBed,
-  fakeAsync,
-  tick,
-} from '@angular/core/testing'
+import { ComponentFixture, TestBed } from '@angular/core/testing'
 import {
   FormControl,
   FormGroup,
@@ -26,6 +21,7 @@ import {
 } from 'src/app/data/matching-model'
 import { Tag } from 'src/app/data/tag'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
+import { PermissionsService } from 'src/app/services/permissions.service'
 import { TagService } from 'src/app/services/rest/tag.service'
 import { UserService } from 'src/app/services/rest/user.service'
 import { SettingsService } from 'src/app/services/settings.service'
@@ -36,6 +32,8 @@ import { EditDialogComponent, EditDialogMode } from './edit-dialog.component'
   template: `
     <div>
       <h4 class="modal-title" id="modal-basic-title">{{ getTitle() }}</h4>
+      <span class="error">{{ error?.name }}</span>
+      <button [disabled]="networkActive" (click)="save()">Save</button>
     </div>
   `,
   imports: [FormsModule, ReactiveFormsModule],
@@ -87,6 +85,7 @@ describe('EditDialogComponent', () => {
   let component: TestComponent
   let fixture: ComponentFixture<TestComponent>
   let tagService: TagService
+  let permissionsService: PermissionsService
   let settingsService: SettingsService
   let activeModal: NgbActiveModal
   let httpTestingController: HttpTestingController
@@ -118,8 +117,10 @@ describe('EditDialogComponent', () => {
     }).compileComponents()
 
     tagService = TestBed.inject(TagService)
+    permissionsService = TestBed.inject(PermissionsService)
     settingsService = TestBed.inject(SettingsService)
-    settingsService.currentUser = currentUser
+    settingsService.currentUser.set(currentUser as any)
+    permissionsService.initialize([], currentUser as any)
     activeModal = TestBed.inject(NgbActiveModal)
     httpTestingController = TestBed.inject(HttpTestingController)
 
@@ -132,7 +133,7 @@ describe('EditDialogComponent', () => {
   it('should interpolate object permissions', () => {
     component.getMatchingAlgorithms() // coverage
     component.object = tag
-    component.dialogMode = EditDialogMode.EDIT
+    component.dialogMode.set(EditDialogMode.EDIT)
     component.ngOnInit()
 
     expect(component.objectForm.get('permissions_form').value).toEqual({
@@ -141,15 +142,17 @@ describe('EditDialogComponent', () => {
     })
   })
 
-  it('should delay close enabled', fakeAsync(() => {
+  it('should delay close enabled', () => {
+    jest.useFakeTimers()
     expect(component.closeEnabled).toBeFalsy()
     component.ngOnInit()
-    tick(100)
+    jest.advanceTimersByTime(100)
     expect(component.closeEnabled).toBeTruthy()
-  }))
+    jest.useRealTimers()
+  })
 
   it('should set default owner when in create mode if unset', () => {
-    component.dialogMode = EditDialogMode.CREATE
+    component.dialogMode.set(EditDialogMode.CREATE)
     component.ngOnInit()
     expect(component.objectForm.get('permissions_form').value.owner).toEqual(
       currentUser.id
@@ -160,7 +163,7 @@ describe('EditDialogComponent', () => {
   })
 
   it('should set default perms when in create mode if set', () => {
-    component.dialogMode = EditDialogMode.CREATE
+    component.dialogMode.set(EditDialogMode.CREATE)
     settingsService.set(SETTINGS_KEYS.DEFAULT_PERMS_OWNER, 11)
     settingsService.set(SETTINGS_KEYS.DEFAULT_PERMS_VIEW_USERS, [1, 2])
     settingsService.set(SETTINGS_KEYS.DEFAULT_PERMS_VIEW_GROUPS, [3])
@@ -199,18 +202,18 @@ describe('EditDialogComponent', () => {
   })
 
   it('should support create and edit modes', () => {
-    component.dialogMode = EditDialogMode.CREATE
+    component.dialogMode.set(EditDialogMode.CREATE)
     const createTitleSpy = jest.spyOn(component, 'getCreateTitle')
     const editTitleSpy = jest.spyOn(component, 'getEditTitle')
-    fixture.detectChanges()
+    component.getTitle()
     expect(createTitleSpy).toHaveBeenCalled()
     expect(editTitleSpy).not.toHaveBeenCalled()
-    component.dialogMode = EditDialogMode.EDIT
-    fixture.detectChanges()
+    component.dialogMode.set(EditDialogMode.EDIT)
+    component.getTitle()
     expect(editTitleSpy).toHaveBeenCalled()
     // coverage
-    component.dialogMode = null
-    fixture.detectChanges()
+    component.dialogMode.set(null)
+    component.getTitle()
   })
 
   it('should close on cancel', () => {
@@ -221,14 +224,33 @@ describe('EditDialogComponent', () => {
 
   it('should update an object on save in edit mode', () => {
     const updateSpy = jest.spyOn(tagService, 'update')
-    component.dialogMode = EditDialogMode.EDIT
+    component.dialogMode.set(EditDialogMode.EDIT)
     component.save()
     expect(updateSpy).toHaveBeenCalled()
   })
 
+  it('should not submit owner or permissions for non-owner edits', () => {
+    component.object = tag
+    component.dialogMode.set(EditDialogMode.EDIT)
+    component.ngOnInit()
+
+    component.objectForm.get('name').setValue('Updated tag')
+    component.save()
+
+    const req = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}tags/${tag.id}/`
+    )
+    expect(req.request.method).toEqual('PUT')
+    expect(req.request.body.name).toEqual('Updated tag')
+    expect(req.request.body.owner).toEqual(tag.owner)
+    expect(req.request.body.set_permissions).toBeUndefined()
+
+    req.flush({})
+  })
+
   it('should create an object on save in edit mode', () => {
     const createSpy = jest.spyOn(tagService, 'create')
-    component.dialogMode = EditDialogMode.CREATE
+    component.dialogMode.set(EditDialogMode.CREATE)
     component.save()
     expect(createSpy).toHaveBeenCalled()
   })
@@ -255,5 +277,23 @@ describe('EditDialogComponent', () => {
     expect(closeSpy).not.toHaveBeenCalled()
     expect(failedSpy).toHaveBeenCalled()
     expect(component.error).toEqual('error')
+  })
+
+  it('should update the view after a failed save', async () => {
+    const button: HTMLButtonElement =
+      fixture.nativeElement.querySelector('button')
+    button.click()
+    await fixture.whenStable()
+    expect(button.disabled).toBe(true)
+
+    httpTestingController
+      .expectOne(`${environment.apiBaseUrl}tags/`)
+      .flush({ name: ['Name is required.'] }, { status: 400, statusText: '' })
+    await fixture.whenStable()
+
+    expect(button.disabled).toBe(false)
+    expect(fixture.nativeElement.querySelector('.error').textContent).toContain(
+      'Name is required.'
+    )
   })
 })

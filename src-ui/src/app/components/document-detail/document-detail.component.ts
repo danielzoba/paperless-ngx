@@ -1,6 +1,13 @@
 import { AsyncPipe, NgTemplateOutlet } from '@angular/common'
 import { HttpClient, HttpResponse } from '@angular/common/http'
-import { Component, inject, OnDestroy, OnInit, ViewChild } from '@angular/core'
+import {
+  Component,
+  inject,
+  OnDestroy,
+  OnInit,
+  signal,
+  ViewChild,
+} from '@angular/core'
 import {
   FormArray,
   FormControl,
@@ -8,38 +15,43 @@ import {
   FormsModule,
   ReactiveFormsModule,
 } from '@angular/forms'
-import { ActivatedRoute, Router } from '@angular/router'
+import { ActivatedRoute, Router, RouterModule } from '@angular/router'
 import {
   NgbDateStruct,
   NgbDropdownModule,
   NgbModal,
+  NgbModalRef,
   NgbNav,
   NgbNavChangeEvent,
   NgbNavModule,
 } from '@ng-bootstrap/ng-bootstrap'
 import { dirtyCheck, DirtyComponent } from '@ngneat/dirty-check-forms'
-import { PDFDocumentProxy, PdfViewerModule } from 'ng2-pdf-viewer'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { DeviceDetectorService } from 'ngx-device-detector'
-import { BehaviorSubject, Observable, of, Subject, timer } from 'rxjs'
+import { BehaviorSubject, merge, Observable, of, Subject, timer } from 'rxjs'
 import {
   catchError,
   debounceTime,
   distinctUntilChanged,
   filter,
+  finalize,
   first,
   map,
   switchMap,
   takeUntil,
+  tap,
 } from 'rxjs/operators'
 import { Correspondent } from 'src/app/data/correspondent'
 import { CustomField, CustomFieldDataType } from 'src/app/data/custom-field'
 import { CustomFieldInstance } from 'src/app/data/custom-field-instance'
 import { DataType } from 'src/app/data/datatype'
-import { Document } from 'src/app/data/document'
+import { Document, DocumentVersionInfo } from 'src/app/data/document'
 import { DocumentMetadata } from 'src/app/data/document-metadata'
 import { DocumentNote } from 'src/app/data/document-note'
-import { DocumentSuggestions } from 'src/app/data/document-suggestions'
+import {
+  DocumentSuggestions,
+  mergeSuggestions,
+} from 'src/app/data/document-suggestions'
 import { DocumentType } from 'src/app/data/document-type'
 import { FilterRule } from 'src/app/data/filter-rule'
 import {
@@ -54,7 +66,7 @@ import {
 import { ObjectWithId } from 'src/app/data/object-with-id'
 import { StoragePath } from 'src/app/data/storage-path'
 import { Tag } from 'src/app/data/tag'
-import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
+import { SETTINGS_KEYS, SuggestionSource } from 'src/app/data/ui-settings'
 import { User } from 'src/app/data/user'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
@@ -73,21 +85,31 @@ import {
 import { CorrespondentService } from 'src/app/services/rest/correspondent.service'
 import { CustomFieldsService } from 'src/app/services/rest/custom-fields.service'
 import { DocumentTypeService } from 'src/app/services/rest/document-type.service'
-import { DocumentService } from 'src/app/services/rest/document.service'
+import {
+  BulkEditSourceMode,
+  DocumentService,
+} from 'src/app/services/rest/document.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { StoragePathService } from 'src/app/services/rest/storage-path.service'
+import { TagService } from 'src/app/services/rest/tag.service'
 import { UserService } from 'src/app/services/rest/user.service'
 import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
+import { TrashService } from 'src/app/services/trash.service'
+import { WebsocketStatusService } from 'src/app/services/websocket-status.service'
 import { getFilenameFromContentDisposition } from 'src/app/utils/http'
 import { ISODateAdapter } from 'src/app/utils/ngb-iso-date-adapter'
 import * as UTIF from 'utif'
+import { DocumentDetailFieldID } from '../admin/settings/settings.component'
 import { ConfirmDialogComponent } from '../common/confirm-dialog/confirm-dialog.component'
+import { PasswordRemovalConfirmDialogComponent } from '../common/confirm-dialog/password-removal-confirm-dialog/password-removal-confirm-dialog.component'
+import { ReprocessConfirmDialogComponent } from '../common/confirm-dialog/reprocess-confirm-dialog/reprocess-confirm-dialog.component'
 import { CustomFieldsDropdownComponent } from '../common/custom-fields-dropdown/custom-fields-dropdown.component'
 import { CorrespondentEditDialogComponent } from '../common/edit-dialog/correspondent-edit-dialog/correspondent-edit-dialog.component'
 import { DocumentTypeEditDialogComponent } from '../common/edit-dialog/document-type-edit-dialog/document-type-edit-dialog.component'
 import { EditDialogMode } from '../common/edit-dialog/edit-dialog.component'
 import { StoragePathEditDialogComponent } from '../common/edit-dialog/storage-path-edit-dialog/storage-path-edit-dialog.component'
+import { TagEditDialogComponent } from '../common/edit-dialog/tag-edit-dialog/tag-edit-dialog.component'
 import { EmailDocumentDialogComponent } from '../common/email-document-dialog/email-document-dialog.component'
 import { CheckComponent } from '../common/input/check/check.component'
 import { DateComponent } from '../common/input/date/date.component'
@@ -101,14 +123,22 @@ import { TextComponent } from '../common/input/text/text.component'
 import { TextAreaComponent } from '../common/input/textarea/textarea.component'
 import { UrlComponent } from '../common/input/url/url.component'
 import { PageHeaderComponent } from '../common/page-header/page-header.component'
+import { PdfEditorEditMode } from '../common/pdf-editor/pdf-editor-edit-mode'
+import { PDFEditorComponent } from '../common/pdf-editor/pdf-editor.component'
+import { PngxPdfViewerComponent } from '../common/pdf-viewer/pdf-viewer.component'
 import {
-  PDFEditorComponent,
-  PdfEditorEditMode,
-} from '../common/pdf-editor/pdf-editor.component'
+  PdfRenderMode,
+  PdfZoomLevel,
+  PdfZoomScale,
+  PngxPdfDocumentProxy,
+} from '../common/pdf-viewer/pdf-viewer.types'
 import { ShareLinksDialogComponent } from '../common/share-links-dialog/share-links-dialog.component'
-import { DocumentHistoryComponent } from '../document-history/document-history.component'
+import { SuggestionsDropdownComponent } from '../common/suggestions-dropdown/suggestions-dropdown.component'
 import { DocumentNotesComponent } from '../document-notes/document-notes.component'
 import { ComponentWithPermissions } from '../with-permissions/with-permissions.component'
+import { DocumentBarcodesComponent } from './document-barcodes/document-barcodes.component'
+import { DocumentHistoryComponent } from './document-history/document-history.component'
+import { DocumentVersionDropdownComponent } from './document-version-dropdown/document-version-dropdown.component'
 import { MetadataCollapseComponent } from './metadata-collapse/metadata-collapse.component'
 
 enum DocumentDetailNavIDs {
@@ -119,6 +149,7 @@ enum DocumentDetailNavIDs {
   Notes = 5,
   Permissions = 6,
   History = 7,
+  Duplicates = 8,
 }
 
 enum ContentRenderType {
@@ -130,16 +161,9 @@ enum ContentRenderType {
   TIFF = 'tiff',
 }
 
-export enum ZoomSetting {
-  PageFit = 'page-fit',
-  PageWidth = 'page-width',
-  Quarter = '.25',
-  Half = '.5',
-  ThreeQuarters = '.75',
-  One = '1',
-  OneAndHalf = '1.5',
-  Two = '2',
-  Three = '3',
+interface IncomingDocumentUpdate {
+  document_id: number
+  modified: string
 }
 
 @Component({
@@ -155,6 +179,7 @@ export enum ZoomSetting {
     DateComponent,
     DocumentLinkComponent,
     MetadataCollapseComponent,
+    DocumentBarcodesComponent,
     PermissionsFormComponent,
     SelectComponent,
     TagsComponent,
@@ -162,6 +187,7 @@ export enum ZoomSetting {
     NumberComponent,
     MonetaryComponent,
     UrlComponent,
+    SuggestionsDropdownComponent,
     CustomDatePipe,
     FileSizePipe,
     IfPermissionsDirective,
@@ -173,16 +199,21 @@ export enum ZoomSetting {
     NgbNavModule,
     NgbDropdownModule,
     NgxBootstrapIconsModule,
-    PdfViewerModule,
     TextAreaComponent,
+    RouterModule,
+    PngxPdfViewerComponent,
+    DocumentVersionDropdownComponent,
   ],
 })
 export class DocumentDetailComponent
   extends ComponentWithPermissions
   implements OnInit, OnDestroy, DirtyComponent
 {
-  private documentsService = inject(DocumentService)
+  PdfRenderMode = PdfRenderMode
+
+  documentsService = inject(DocumentService)
   private route = inject(ActivatedRoute)
+  private tagService = inject(TagService)
   private correspondentService = inject(CorrespondentService)
   private documentTypeService = inject(DocumentTypeService)
   private router = inject(Router)
@@ -191,6 +222,7 @@ export class DocumentDetailComponent
   private documentListViewService = inject(DocumentListViewService)
   private documentTitlePipe = inject(DocumentTitlePipe)
   private toastService = inject(ToastService)
+  private trashService = inject(TrashService)
   private settings = inject(SettingsService)
   private storagePathService = inject(StoragePathService)
   private permissionsService = inject(PermissionsService)
@@ -201,35 +233,68 @@ export class DocumentDetailComponent
   private componentRouterService = inject(ComponentRouterService)
   private deviceDetectorService = inject(DeviceDetectorService)
   private savedViewService = inject(SavedViewService)
+  private readonly websocketStatusService = inject(WebsocketStatusService)
+  private readonly useNativePdfViewerSetting = this.settings.getSignal<boolean>(
+    SETTINGS_KEYS.USE_NATIVE_PDF_VIEWER
+  )
+  private readonly aiEnabledSetting = this.settings.getSignal<boolean>(
+    SETTINGS_KEYS.AI_ENABLED
+  )
+  private readonly showThumbnailOverlaySetting =
+    this.settings.getSignal<boolean>(
+      SETTINGS_KEYS.DOCUMENT_EDITING_OVERLAY_THUMBNAIL
+    )
+  private readonly autoSuggestSetting = this.settings.getSignal<boolean>(
+    SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST
+  )
+  private readonly suggestionSourceSetting =
+    this.settings.getSignal<SuggestionSource>(
+      SETTINGS_KEYS.DOCUMENT_EDITING_SUGGESTION_SOURCE
+    )
+  private readonly hiddenFieldsSetting = this.settings.getSignal<
+    DocumentDetailFieldID[]
+  >(SETTINGS_KEYS.DOCUMENT_DETAILS_HIDDEN_FIELDS)
 
   @ViewChild('inputTitle')
   titleInput: TextComponent
 
+  @ViewChild('tagsInput') tagsInput: TagsComponent
+
   expandOriginalMetadata = false
   expandArchivedMetadata = false
 
-  error: any
+  readonly error = signal<any>(undefined)
 
-  networkActive = false
+  readonly networkActive = signal(false)
 
-  documentId: number
-  document: Document
-  metadata: DocumentMetadata
-  suggestions: DocumentSuggestions
-  users: User[]
+  readonly documentId = signal<number>(undefined)
+  readonly document = signal<Document>(undefined)
+  readonly metadata = signal<DocumentMetadata>(undefined)
+  readonly suggestions = signal<DocumentSuggestions>(undefined)
+  readonly suggestionsLoading = signal(false)
+  // per-document, resets on navigation
+  readonly suggestionSourceOverride = signal<SuggestionSource>(null)
+  readonly fetchedSuggestionSources = signal<SuggestionSource[]>([])
+  readonly users = signal<User[]>(undefined)
 
-  title: string
+  readonly title = signal<string>(undefined)
   titleSubject: Subject<string> = new Subject()
-  previewUrl: string
-  thumbUrl: string
-  previewText: string
-  previewLoaded: boolean = false
-  tiffURL: string
-  tiffError: string
+  readonly previewUrl = signal<string>(undefined)
+  readonly pdfSource = signal<string>(undefined)
+  readonly previewRevision = signal(0)
+  readonly pdfPassword = signal<string>(undefined)
+  readonly thumbUrl = signal<string>(undefined)
+  readonly previewText = signal<string>(undefined)
+  readonly previewLoaded = signal(false)
+  readonly tiffURL = signal<string>(undefined)
+  readonly tiffError = signal<string>(undefined)
 
-  correspondents: Correspondent[]
-  documentTypes: DocumentType[]
-  storagePaths: StoragePath[]
+  // Versioning
+  readonly selectedVersionId = signal<number>(undefined)
+
+  readonly correspondents = signal<Correspondent[]>(undefined)
+  readonly documentTypes = signal<DocumentType[]>(undefined)
+  readonly storagePaths = signal<StoragePath[]>(undefined)
 
   documentForm: FormGroup = new FormGroup({
     title: new FormControl(''),
@@ -244,24 +309,31 @@ export class DocumentDetailComponent
     custom_fields: new FormArray([]),
   })
 
-  previewCurrentPage: number = 1
-  previewNumPages: number
-  previewZoomSetting: ZoomSetting = ZoomSetting.One
-  previewZoomScale: ZoomSetting = ZoomSetting.PageWidth
+  readonly previewCurrentPage = signal(1)
+  readonly previewNumPages = signal<number>(undefined)
+  readonly previewZoomSetting = signal<PdfZoomLevel>(PdfZoomLevel.One)
+  readonly previewZoomScale = signal<PdfZoomScale>(PdfZoomScale.PageWidth)
 
   store: BehaviorSubject<any>
   isDirty$: Observable<boolean>
   unsubscribeNotifier: Subject<any> = new Subject()
   docChangeNotifier: Subject<any> = new Subject()
+  versionChangeNotifier: Subject<void> = new Subject()
+  private incomingUpdateModal: NgbModalRef
+  private pendingIncomingUpdate: IncomingDocumentUpdate
+  private lastLocalSaveModified: string | null = null
+  private printIframe: HTMLIFrameElement | null = null
+  private printBlobUrl: string | null = null
 
   requiresPassword: boolean = false
   password: string
 
   ogDate: Date
 
-  customFields: CustomField[]
+  readonly customFields = signal<CustomField[]>(undefined)
 
-  public downloading: boolean = false
+  readonly downloading = signal(false)
+  public useFormattedFilename: boolean = false
 
   public readonly CustomFieldDataType = CustomFieldDataType
 
@@ -269,46 +341,76 @@ export class DocumentDetailComponent
 
   public readonly DataType = DataType
 
+  public readonly DocumentDetailFieldID = DocumentDetailFieldID
+
   @ViewChild('nav') nav: NgbNav
   @ViewChild('pdfPreview') set pdfPreview(element) {
     // this gets called when component added or removed from DOM
     if (
       element &&
       element.nativeElement.offsetParent !== null &&
-      this.nav?.activeId == 4
+      this.nav?.activeId == DocumentDetailNavIDs.Preview
     ) {
       // its visible
-      setTimeout(() => this.nav?.select(1))
+      setTimeout(() => this.nav?.select(DocumentDetailNavIDs.Details))
     }
   }
 
   DocumentDetailNavIDs = DocumentDetailNavIDs
-  activeNavID: number
+  readonly activeNavID = signal<number>(undefined)
 
   titleKeyUp(event) {
     this.titleSubject.next(event.target?.value)
   }
 
   get useNativePdfViewer(): boolean {
-    return this.settings.get(SETTINGS_KEYS.USE_NATIVE_PDF_VIEWER)
+    return this.useNativePdfViewerSetting()
   }
 
   get isMobile(): boolean {
     return this.deviceDetectorService.isMobile()
   }
 
+  get aiEnabled(): boolean {
+    return this.aiEnabledSetting()
+  }
+
+  get autoSuggest(): boolean {
+    return this.autoSuggestSetting()
+  }
+
+  get defaultSuggestionSource(): SuggestionSource {
+    return this.aiEnabled ? this.suggestionSourceSetting() : SuggestionSource.ML
+  }
+
+  get suggestionSource(): SuggestionSource {
+    if (!this.aiEnabled) return SuggestionSource.ML
+    return this.suggestionSourceOverride() ?? this.defaultSuggestionSource
+  }
+
   get archiveContentRenderType(): ContentRenderType {
-    return this.document?.archived_file_name
+    const hasArchiveVersion =
+      this.metadata()?.has_archive_version ??
+      !!this.document()?.archived_file_name
+    return hasArchiveVersion
       ? this.getRenderType('application/pdf')
-      : this.getRenderType(this.document?.mime_type)
+      : this.getRenderType(
+          this.metadata()?.original_mime_type || this.document()?.mime_type
+        )
   }
 
   get originalContentRenderType(): ContentRenderType {
-    return this.getRenderType(this.document?.mime_type)
+    return this.getRenderType(
+      this.metadata()?.original_mime_type || this.document()?.mime_type
+    )
   }
 
   get showThumbnailOverlay(): boolean {
-    return this.settings.get(SETTINGS_KEYS.DOCUMENT_EDITING_OVERLAY_THUMBNAIL)
+    return this.showThumbnailOverlaySetting()
+  }
+
+  isFieldHidden(fieldId: DocumentDetailFieldID): boolean {
+    return this.hiddenFieldsSetting().includes(fieldId)
   }
 
   private getRenderType(mimeType: string): ContentRenderType {
@@ -327,10 +429,50 @@ export class DocumentDetailComponent
     return ContentRenderType.Other
   }
 
+  private updatePdfSource() {
+    this.pdfSource.set(this.previewUrl())
+    this.pdfPassword.set(this.password)
+  }
+
+  private loadMetadataForSelectedVersion() {
+    const selectedVersionId = this.getSelectedNonLatestVersionId()
+    this.documentsService
+      .getMetadata(this.documentId(), selectedVersionId)
+      .pipe(
+        first(),
+        takeUntil(this.unsubscribeNotifier),
+        takeUntil(this.docChangeNotifier),
+        takeUntil(this.versionChangeNotifier)
+      )
+      .subscribe({
+        next: (result) => {
+          this.metadata.set(result)
+          this.tiffURL.set(null)
+          this.tiffError.set(null)
+          if (this.archiveContentRenderType === ContentRenderType.TIFF) {
+            this.tryRenderTiff()
+          }
+          if (
+            this.archiveContentRenderType !== ContentRenderType.PDF ||
+            this.useNativePdfViewer
+          ) {
+            this.previewLoaded.set(true)
+          }
+        },
+        error: (error) => {
+          this.metadata.set({}) // allow display to fallback to <object> tag
+          this.toastService.showError(
+            $localize`Error retrieving metadata`,
+            error
+          )
+        },
+      })
+  }
+
   get isRTL() {
-    if (!this.metadata || !this.metadata.lang) return false
+    if (!this.metadata()?.lang) return false
     else {
-      return ['ar', 'he', 'fe'].includes(this.metadata.lang)
+      return ['ar', 'he', 'fe'].includes(this.metadata().lang)
     }
   }
 
@@ -401,27 +543,58 @@ export class DocumentDetailComponent
       )
   }
 
-  private loadDocument(documentId: number): void {
-    this.previewUrl = this.documentsService.getPreviewUrl(documentId)
+  private loadDocument(documentId: number, forceRemote: boolean = false): void {
+    let redirectedToRoot = false
+    this.closeIncomingUpdateModal()
+    this.pendingIncomingUpdate = null
+    this.selectedVersionId.set(documentId)
+    this.lastLocalSaveModified = null
+    this.previewUrl.set(
+      this.documentsService.getPreviewUrl(this.selectedVersionId())
+    )
+    this.updatePdfSource()
     this.http
-      .get(this.previewUrl, { responseType: 'text' })
+      .get(this.previewUrl(), { responseType: 'text' })
       .pipe(
         first(),
         takeUntil(this.unsubscribeNotifier),
-        takeUntil(this.docChangeNotifier)
+        takeUntil(this.docChangeNotifier),
+        takeUntil(this.versionChangeNotifier)
       )
       .subscribe({
-        next: (res) => (this.previewText = res.toString()),
+        next: (res) => this.previewText.set(res.toString()),
         error: (err) =>
-          (this.previewText = $localize`An error occurred loading content: ${
-            err.message ?? err.toString()
-          }`),
+          this.previewText.set(
+            $localize`An error occurred loading content: ${
+              err.message ?? err.toString()
+            }`
+          ),
       })
-    this.thumbUrl = this.documentsService.getThumbUrl(documentId)
+    this.thumbUrl.set(
+      this.documentsService.getThumbUrl(this.selectedVersionId())
+    )
     this.documentsService
       .get(documentId)
       .pipe(
-        catchError(() => {
+        catchError((error) => {
+          if (error?.status === 404) {
+            // if not found, check if there's root document that exists and redirect if so
+            return this.documentsService.getRootId(documentId).pipe(
+              map((result) => {
+                const rootId = result?.root_id
+                if (rootId && rootId !== documentId) {
+                  const section =
+                    this.route.snapshot.paramMap.get('section') || 'details'
+                  redirectedToRoot = true
+                  this.router.navigate(['documents', rootId, section], {
+                    replaceUrl: true,
+                  })
+                }
+                return null
+              }),
+              catchError(() => of(null))
+            )
+          }
           // 404 is handled in the subscribe below
           return of(null)
         }),
@@ -432,29 +605,50 @@ export class DocumentDetailComponent
       .subscribe({
         next: (doc) => {
           if (!doc) {
+            if (redirectedToRoot) {
+              return
+            }
             this.router.navigate(['404'], { replaceUrl: true })
             return
           }
-          this.documentId = doc.id
-          this.suggestions = null
+          this.documentId.set(doc.id)
+          this.suggestions.set(null)
+          this.suggestionSourceOverride.set(null)
+          this.fetchedSuggestionSources.set([])
           const openDocument = this.openDocumentService.getOpenDocument(
-            this.documentId
+            this.documentId()
           )
-          const useDoc = openDocument || doc
+          // update duplicate documents if present
+          if (openDocument && doc?.duplicate_documents) {
+            openDocument.duplicate_documents = doc.duplicate_documents
+            this.openDocumentService.save()
+          }
+          // use server versions
           if (openDocument) {
-            if (
-              new Date(doc.modified) > new Date(openDocument.modified) &&
-              !this.modalService.hasOpenModals()
-            ) {
-              const modal = this.modalService.open(ConfirmDialogComponent)
-              modal.componentInstance.title = $localize`Document changes detected`
-              modal.componentInstance.messageBold = $localize`The version of this document in your browser session appears older than the existing version.`
-              modal.componentInstance.message = $localize`Saving the document here may overwrite other changes that were made. To restore the existing version, discard your changes or close the document.`
-              modal.componentInstance.cancelBtnClass = 'visually-hidden'
-              modal.componentInstance.btnCaption = $localize`Ok`
-              modal.componentInstance.confirmClicked.subscribe(() =>
-                modal.close()
-              )
+            openDocument.versions = doc.versions
+            if (!openDocument.__changedFields?.includes('content')) {
+              openDocument.content = doc.content
+            }
+          }
+          let useDoc = openDocument || doc
+          if (openDocument && forceRemote) {
+            Object.assign(openDocument, doc)
+            openDocument.__changedFields = []
+            this.openDocumentService.setDirty(openDocument, false)
+            this.openDocumentService.save()
+            useDoc = openDocument
+          } else if (openDocument) {
+            if (new Date(doc.modified) > new Date(openDocument.modified)) {
+              if (this.hasLocalEdits(openDocument)) {
+                this.showIncomingUpdateModal(doc.modified)
+              } else {
+                // No local edits to preserve, so keep the tab in sync automatically.
+                Object.assign(openDocument, doc)
+                openDocument.__changedFields = []
+                this.openDocumentService.setDirty(openDocument, false)
+                this.openDocumentService.save()
+                useDoc = openDocument
+              }
             }
           } else {
             this.openDocumentService
@@ -467,6 +661,9 @@ export class DocumentDetailComponent
               .subscribe()
           }
           this.updateComponent(useDoc)
+          if (forceRemote) {
+            this.previewRevision.update((revision) => revision + 1)
+          }
           this.titleSubject
             .pipe(
               debounceTime(1000),
@@ -476,22 +673,123 @@ export class DocumentDetailComponent
             )
             .subscribe((titleValue) => {
               if (titleValue !== this.titleInput.value) return
-              this.title = titleValue
+              this.title.set(titleValue)
               this.documentForm.patchValue({ title: titleValue })
               this.documentForm.get('title').markAsDirty()
             })
+          const keepContentEdits =
+            useDoc.__selectedVersionId === this.selectedVersionId() &&
+            !!useDoc.__changedFields?.includes('content')
           this.setupDirtyTracking(useDoc, doc)
+          // Maybe load the stored version
+          if (useDoc.__selectedVersionId) {
+            this.selectVersion(this.selectedVersionId(), keepContentEdits)
+          }
         },
       })
   }
 
+  private hasLocalEdits(doc: Document): boolean {
+    return (
+      this.openDocumentService.isDirty(doc) || !!doc.__changedFields?.length
+    )
+  }
+
+  private showIncomingUpdateModal(modified: string): void {
+    if (this.incomingUpdateModal) return
+
+    const modal = this.modalService.open(ConfirmDialogComponent, {
+      backdrop: 'static',
+    })
+    this.incomingUpdateModal = modal
+
+    let formattedModified = null
+    const parsed = new Date(modified)
+    formattedModified = parsed.toLocaleString()
+
+    modal.componentInstance.title = $localize`Document was updated`
+    modal.componentInstance.messageBold = $localize`Document was updated at ${formattedModified}.`
+    modal.componentInstance.message = $localize`Reload to discard your local unsaved edits and load the latest remote version.`
+    modal.componentInstance.btnClass = 'btn-warning'
+    modal.componentInstance.btnCaption = $localize`Reload`
+    modal.componentInstance.cancelBtnCaption = $localize`Dismiss`
+
+    modal.componentInstance.confirmClicked.pipe(first()).subscribe(() => {
+      modal.componentInstance.buttonsEnabled.set(false)
+      modal.close()
+      this.reloadRemoteVersion()
+    })
+    modal.result.finally(() => {
+      this.incomingUpdateModal = null
+    })
+  }
+
+  private closeIncomingUpdateModal() {
+    if (!this.incomingUpdateModal) return
+    this.incomingUpdateModal.close()
+    this.incomingUpdateModal = null
+  }
+
+  private flushPendingIncomingUpdate() {
+    if (!this.pendingIncomingUpdate || this.networkActive()) return
+    const pendingUpdate = this.pendingIncomingUpdate
+    this.pendingIncomingUpdate = null
+    this.handleIncomingDocumentUpdated(pendingUpdate)
+  }
+
+  private handleIncomingDocumentUpdated(data: IncomingDocumentUpdate): void {
+    if (
+      !this.documentId() ||
+      !this.document() ||
+      data.document_id !== this.documentId()
+    )
+      return
+    if (this.networkActive()) {
+      this.pendingIncomingUpdate = data
+      return
+    }
+    // If modified timestamp of the incoming update is the same as the last local save,
+    // we assume this update is from our own save and dont notify
+    const incomingModified = data.modified
+    if (
+      incomingModified &&
+      this.lastLocalSaveModified &&
+      incomingModified === this.lastLocalSaveModified
+    ) {
+      this.lastLocalSaveModified = null
+      return
+    }
+    this.lastLocalSaveModified = null
+
+    if (this.openDocumentService.isDirty(this.document())) {
+      this.showIncomingUpdateModal(data.modified)
+    } else {
+      this.docChangeNotifier.next(this.documentId())
+      this.loadDocument(this.documentId(), true)
+      this.toastService.showInfo(
+        $localize`Document reloaded with latest changes.`
+      )
+    }
+  }
+
+  private reloadRemoteVersion() {
+    if (!this.documentId()) return
+
+    this.closeIncomingUpdateModal()
+    this.docChangeNotifier.next(this.documentId())
+    this.loadDocument(this.documentId(), true)
+    this.toastService.showInfo($localize`Document reloaded.`)
+  }
+
   ngOnInit(): void {
-    this.setZoom(this.settings.get(SETTINGS_KEYS.PDF_VIEWER_ZOOM_SETTING))
+    this.setZoom(
+      this.settings.get(SETTINGS_KEYS.PDF_VIEWER_ZOOM_SETTING) as PdfZoomScale
+    )
     this.documentForm.valueChanges
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe((values) => {
-        this.error = null
-        Object.assign(this.document, this.mapFormToDoc(values))
+        this.error.set(null)
+        Object.assign(this.document(), this.mapFormToDoc(values))
       })
 
     if (
@@ -503,7 +801,7 @@ export class DocumentDetailComponent
       this.correspondentService
         .listAll()
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
-        .subscribe((result) => (this.correspondents = result.results))
+        .subscribe((result) => this.correspondents.set(result.results))
     }
     if (
       this.permissionsService.currentUserCan(
@@ -514,7 +812,7 @@ export class DocumentDetailComponent
       this.documentTypeService
         .listAll()
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
-        .subscribe((result) => (this.documentTypes = result.results))
+        .subscribe((result) => this.documentTypes.set(result.results))
     }
     if (
       this.permissionsService.currentUserCan(
@@ -525,7 +823,7 @@ export class DocumentDetailComponent
       this.storagePathService
         .listAll()
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
-        .subscribe((result) => (this.storagePaths = result.results))
+        .subscribe((result) => this.storagePaths.set(result.results))
     }
     if (
       this.permissionsService.currentUserCan(
@@ -536,16 +834,21 @@ export class DocumentDetailComponent
       this.userService
         .listAll()
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
-        .subscribe((result) => (this.users = result.results))
+        .subscribe((result) => this.users.set(result.results))
     }
 
     this.getCustomFields()
+
+    this.websocketStatusService
+      .onDocumentUpdated()
+      .pipe(takeUntil(this.unsubscribeNotifier))
+      .subscribe((data) => this.handleIncomingDocumentUpdated(data))
 
     this.route.paramMap
       .pipe(
         filter(
           (paramMap) =>
-            +paramMap.get('id') !== this.documentId &&
+            +paramMap.get('id') !== this.documentId() &&
             paramMap.get('section')?.length > 0
         ),
         takeUntil(this.unsubscribeNotifier)
@@ -565,7 +868,7 @@ export class DocumentDetailComponent
             (navID) => navID.toLowerCase() == section
           )
           if (navIDKey) {
-            this.activeNavID = DocumentDetailNavIDs[navIDKey]
+            this.activeNavID.set(DocumentDetailNavIDs[navIDKey])
           }
         } else if (paramMap.get('id')) {
           this.router.navigate(['documents', +paramMap.get('id'), 'details'], {
@@ -605,7 +908,7 @@ export class DocumentDetailComponent
       .addShortcut({ keys: 'control.s', description: $localize`Save document` })
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(() => {
-        if (this.openDocumentService.isDirty(this.document)) this.save()
+        if (this.openDocumentService.isDirty(this.document())) this.save()
       })
 
     this.hotKeyService
@@ -615,7 +918,7 @@ export class DocumentDetailComponent
       })
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(() => {
-        if (this.openDocumentService.isDirty(this.document)) {
+        if (this.openDocumentService.isDirty(this.document())) {
           if (this.hasNext()) this.saveEditNext()
           else this.save(true)
         }
@@ -623,6 +926,7 @@ export class DocumentDetailComponent
   }
 
   ngOnDestroy(): void {
+    this.cleanupPrintDocument()
     this.unsubscribeNotifier.next(this)
     this.unsubscribeNotifier.complete()
   }
@@ -634,44 +938,24 @@ export class DocumentDetailComponent
     if (foundNavIDkey)
       this.router.navigate([
         'documents',
-        this.documentId,
+        this.documentId(),
         foundNavIDkey.toLowerCase(),
       ])
   }
 
   updateComponent(doc: Document) {
-    this.document = doc
+    this.document.set(doc)
+    // Load the selected version, or default to API first (newest)
+    const versions = doc.versions ?? []
+    const selectedVersion =
+      versions.find((v) => v.id === doc.__selectedVersionId) ?? versions[0]
+    this.selectedVersionId.set(selectedVersion?.id ?? doc.id)
+    this.previewLoaded.set(false)
     this.requiresPassword = false
     this.updateFormForCustomFields()
-    if (this.archiveContentRenderType === ContentRenderType.TIFF) {
-      this.tryRenderTiff()
-    }
-    this.documentsService
-      .getMetadata(doc.id)
-      .pipe(
-        first(),
-        takeUntil(this.unsubscribeNotifier),
-        takeUntil(this.docChangeNotifier)
-      )
-      .subscribe({
-        next: (result) => {
-          this.metadata = result
-          if (
-            this.archiveContentRenderType !== ContentRenderType.PDF ||
-            this.useNativePdfViewer
-          ) {
-            this.previewLoaded = true
-          }
-        },
-        error: (error) => {
-          this.metadata = {} // allow display to fallback to <object> tag
-          this.toastService.showError(
-            $localize`Error retrieving metadata`,
-            error
-          )
-        },
-      })
+    this.loadMetadataForSelectedVersion()
     if (
+      this.autoSuggest &&
       this.permissionsService.currentUserHasObjectPermissions(
         PermissionAction.Change,
         doc
@@ -681,39 +965,221 @@ export class DocumentDetailComponent
         PermissionType.Document
       )
     ) {
-      this.documentsService
-        .getSuggestions(doc.id)
-        .pipe(
-          first(),
-          takeUntil(this.unsubscribeNotifier),
-          takeUntil(this.docChangeNotifier)
-        )
-        .subscribe({
-          next: (result) => {
-            this.suggestions = result
-          },
-          error: (error) => {
-            this.suggestions = null
-            this.toastService.showError(
-              $localize`Error retrieving suggestions.`,
-              error
-            )
-          },
-        })
+      this.tagService.getCachedMany(doc.tags).subscribe((tags) => {
+        // only show suggestions if document has inbox tags
+        if (tags.some((tag) => tag.is_inbox_tag)) {
+          this.getSuggestions()
+        }
+      })
     }
-    this.title = this.documentTitlePipe.transform(doc.title)
+    this.title.set(this.documentTitlePipe.transform(doc.title))
     this.prepareForm(doc)
+
+    if (
+      this.activeNavID() === DocumentDetailNavIDs.Duplicates &&
+      !doc?.duplicate_documents?.length
+    ) {
+      this.activeNavID.set(DocumentDetailNavIDs.Details)
+    }
+  }
+
+  // Update file preview and download target to a specific version (by document id)
+  selectVersion(versionId: number, keepContentEdits: boolean = false) {
+    this.versionChangeNotifier.next()
+    this.selectedVersionId.set(versionId)
+    // remember so the version can be restored when returning to the document
+    this.document().__selectedVersionId = versionId
+    this.openDocumentService.save()
+    this.previewLoaded.set(false)
+    this.previewUrl.set(
+      this.documentsService.getPreviewUrl(
+        this.documentId(),
+        false,
+        this.selectedVersionId()
+      )
+    )
+    this.updatePdfSource()
+    this.thumbUrl.set(
+      this.documentsService.getThumbUrl(
+        this.documentId(),
+        this.selectedVersionId()
+      )
+    )
+    this.loadMetadataForSelectedVersion()
+    this.documentsService
+      .get(this.documentId(), this.selectedVersionId(), 'content')
+      .pipe(
+        first(),
+        takeUntil(this.unsubscribeNotifier),
+        takeUntil(this.docChangeNotifier),
+        takeUntil(this.versionChangeNotifier)
+      )
+      .subscribe({
+        next: (doc) => {
+          const content = doc?.content ?? ''
+          if (keepContentEdits) {
+            this.store.next({ ...this.store.value, content })
+          } else {
+            // Update in-place and avoid the debounce wait
+            this.store.value.content = content
+            this.documentForm.patchValue({ content })
+            this.documentForm.get('content').markAsPristine()
+          }
+        },
+        error: (error) => {
+          this.toastService.showError(
+            $localize`Error retrieving version content`,
+            error
+          )
+        },
+      })
+    // For text previews, refresh content
+    this.http
+      .get(this.previewUrl(), { responseType: 'text' })
+      .pipe(
+        first(),
+        takeUntil(this.unsubscribeNotifier),
+        takeUntil(this.docChangeNotifier),
+        takeUntil(this.versionChangeNotifier)
+      )
+      .subscribe({
+        next: (res) => this.previewText.set(res.toString()),
+        error: (err) =>
+          this.previewText.set(
+            $localize`An error occurred loading content: ${
+              err.message ?? err.toString()
+            }`
+          ),
+      })
+  }
+
+  onVersionSelected(versionId: number) {
+    if (versionId === this.selectedVersionId()) return
+    // Bail if the selected version was just deleted.
+    const selectedVersionExists = this.document()?.versions?.some(
+      (v) => v.id === this.selectedVersionId()
+    )
+    if (this.networkActive() && selectedVersionExists) return
+    if (
+      !selectedVersionExists ||
+      this.documentForm.get('content').value === this.store.value.content
+    ) {
+      this.selectVersion(versionId)
+      return
+    }
+
+    // Confirm any unsaved content changes
+    const modal = this.modalService.open(ConfirmDialogComponent, {
+      backdrop: 'static',
+    })
+    modal.componentInstance.title = $localize`Unsaved Changes`
+    modal.componentInstance.messageBold = $localize`You have unsaved changes to the content of this version.`
+    modal.componentInstance.message = $localize`Switching versions will discard them.`
+    modal.componentInstance.btnClass = 'btn-secondary'
+    modal.componentInstance.btnCaption = $localize`Discard and switch`
+    modal.componentInstance.alternativeBtnClass = 'btn-primary'
+    modal.componentInstance.alternativeBtnCaption = $localize`Save and switch`
+    modal.componentInstance.confirmClicked.pipe(first()).subscribe(() => {
+      modal.close()
+      this.selectVersion(versionId)
+    })
+    modal.componentInstance.alternativeClicked.pipe(first()).subscribe(() => {
+      modal.close()
+      this.save(false, () => this.selectVersion(versionId))
+    })
+  }
+
+  onVersionsUpdated(versions: DocumentVersionInfo[]) {
+    this.document().versions = versions
+    const openDoc = this.openDocumentService.getOpenDocument(this.documentId())
+    if (openDoc) {
+      openDoc.versions = versions
+      this.openDocumentService.save()
+    }
   }
 
   get customFieldFormFields(): FormArray {
     return this.documentForm.get('custom_fields') as FormArray
   }
 
+  getSuggestions(source: SuggestionSource = this.suggestionSource) {
+    const sources = (
+      source === SuggestionSource.Both
+        ? [SuggestionSource.ML, SuggestionSource.AI]
+        : [source]
+    ).filter((s) => !this.fetchedSuggestionSources().includes(s))
+    if (!sources.length) return
+
+    this.suggestionsLoading.set(true)
+    merge(
+      ...sources.map((s) =>
+        (s === SuggestionSource.AI
+          ? this.documentsService.getAiSuggestions(this.documentId())
+          : this.documentsService.getSuggestions(this.documentId())
+        ).pipe(
+          first(),
+          map((result) => ({ source: s, result })),
+          catchError((error) => {
+            this.toastService.showError(
+              $localize`Error retrieving suggestions.`,
+              error
+            )
+            return of(null)
+          })
+        )
+      )
+    )
+      .pipe(
+        takeUntil(this.unsubscribeNotifier),
+        takeUntil(this.docChangeNotifier),
+        finalize(() => this.suggestionsLoading.set(false))
+      )
+      .subscribe((response) => {
+        if (!response) return
+        this.fetchedSuggestionSources.update((f) => [...f, response.source])
+        this.suggestions.set(
+          mergeSuggestions(this.suggestions(), response.result)
+        )
+      })
+  }
+
+  createTag(newName: string) {
+    var modal = this.modalService.open(TagEditDialogComponent, {
+      backdrop: 'static',
+    })
+    modal.componentInstance.dialogMode.set(EditDialogMode.CREATE)
+    if (newName) modal.componentInstance.object = { name: newName }
+    modal.componentInstance.succeeded
+      .pipe(
+        tap((newTag: Tag) => {
+          // remove from suggestions if present
+          if (this.suggestions()) {
+            this.suggestions.set({
+              ...this.suggestions(),
+              suggested_tags: (this.suggestions().suggested_tags ?? []).filter(
+                (tag) => tag !== newTag.name
+              ),
+            })
+          }
+        }),
+        switchMap((newTag: Tag) => {
+          return this.tagService
+            .listAll()
+            .pipe(map((tags) => ({ newTag, tags })))
+        }),
+        takeUntil(this.unsubscribeNotifier)
+      )
+      .subscribe(({ newTag, tags }) => {
+        this.tagsInput.tags = tags.results
+        this.tagsInput.addTag(newTag.id)
+      })
+  }
+
   createDocumentType(newName: string) {
     var modal = this.modalService.open(DocumentTypeEditDialogComponent, {
       backdrop: 'static',
     })
-    modal.componentInstance.dialogMode = EditDialogMode.CREATE
+    modal.componentInstance.dialogMode.set(EditDialogMode.CREATE)
     if (newName) modal.componentInstance.object = { name: newName }
     modal.componentInstance.succeeded
       .pipe(
@@ -725,9 +1191,17 @@ export class DocumentDetailComponent
       )
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(({ newDocumentType, documentTypes }) => {
-        this.documentTypes = documentTypes.results
+        this.documentTypes.set(documentTypes.results)
         this.documentForm.get('document_type').setValue(newDocumentType.id)
         this.documentForm.get('document_type').markAsDirty()
+        if (this.suggestions()) {
+          this.suggestions.set({
+            ...this.suggestions(),
+            suggested_document_types: (
+              this.suggestions().suggested_document_types ?? []
+            ).filter((dt) => dt !== newName),
+          })
+        }
       })
   }
 
@@ -735,7 +1209,7 @@ export class DocumentDetailComponent
     var modal = this.modalService.open(CorrespondentEditDialogComponent, {
       backdrop: 'static',
     })
-    modal.componentInstance.dialogMode = EditDialogMode.CREATE
+    modal.componentInstance.dialogMode.set(EditDialogMode.CREATE)
     if (newName) modal.componentInstance.object = { name: newName }
     modal.componentInstance.succeeded
       .pipe(
@@ -749,9 +1223,17 @@ export class DocumentDetailComponent
       )
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(({ newCorrespondent, correspondents }) => {
-        this.correspondents = correspondents.results
+        this.correspondents.set(correspondents.results)
         this.documentForm.get('correspondent').setValue(newCorrespondent.id)
         this.documentForm.get('correspondent').markAsDirty()
+        if (this.suggestions()) {
+          this.suggestions.set({
+            ...this.suggestions(),
+            suggested_correspondents: (
+              this.suggestions().suggested_correspondents ?? []
+            ).filter((c) => c !== newName),
+          })
+        }
       })
   }
 
@@ -759,7 +1241,7 @@ export class DocumentDetailComponent
     var modal = this.modalService.open(StoragePathEditDialogComponent, {
       backdrop: 'static',
     })
-    modal.componentInstance.dialogMode = EditDialogMode.CREATE
+    modal.componentInstance.dialogMode.set(EditDialogMode.CREATE)
     if (newName) modal.componentInstance.object = { name: newName }
     modal.componentInstance.succeeded
       .pipe(
@@ -771,7 +1253,7 @@ export class DocumentDetailComponent
       )
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(({ newStoragePath, storagePaths }) => {
-        this.storagePaths = storagePaths.results
+        this.storagePaths.set(storagePaths.results)
         this.documentForm.get('storage_path').setValue(newStoragePath.id)
         this.documentForm.get('storage_path').markAsDirty()
       })
@@ -804,7 +1286,7 @@ export class DocumentDetailComponent
 
   discard() {
     this.documentsService
-      .get(this.documentId)
+      .get(this.documentId(), this.selectedVersionId())
       .pipe(
         first(),
         takeUntil(this.unsubscribeNotifier),
@@ -812,12 +1294,13 @@ export class DocumentDetailComponent
       )
       .subscribe({
         next: (doc) => {
-          Object.assign(this.document, doc)
+          this.closeIncomingUpdateModal()
+          Object.assign(this.document(), doc)
           doc['permissions_form'] = {
             owner: doc.owner,
             set_permissions: doc.permissions,
           }
-          this.title = doc.title
+          this.title.set(doc.title)
           this.updateFormForCustomFields()
           this.documentForm.patchValue(doc)
           this.documentForm.markAsPristine()
@@ -833,7 +1316,7 @@ export class DocumentDetailComponent
 
   private getChangedFields(): any {
     const changes = {
-      id: this.document.id,
+      id: this.document().id,
     }
     Object.keys(this.documentForm.controls).forEach((key) => {
       if (this.documentForm.get(key).dirty) {
@@ -850,70 +1333,77 @@ export class DocumentDetailComponent
     return changes
   }
 
-  save(close: boolean = false) {
-    this.networkActive = true
+  save(close: boolean = false, savedCallback: () => void = null) {
+    this.networkActive.set(true)
     ;(document.activeElement as HTMLElement)?.dispatchEvent(new Event('change'))
     this.documentsService
-      .patch(this.getChangedFields())
+      .patch(this.getChangedFields(), this.selectedVersionId())
       .pipe(first())
       .subscribe({
         next: (docValues) => {
+          this.closeIncomingUpdateModal()
+          this.lastLocalSaveModified = docValues.modified ?? null
           // in case data changed while saving eg removing inbox_tags
           this.documentForm.patchValue(docValues)
           const newValues = Object.assign({}, this.documentForm.value)
           newValues.tags = [...docValues.tags]
           newValues.custom_fields = [...docValues.custom_fields]
           this.store.next(newValues)
-          this.openDocumentService.setDirty(this.document, false)
+          this.openDocumentService.setDirty(this.document(), false)
           this.openDocumentService.save()
-          this.toastService.showInfo(
+          this.toastService.showSuccess(
             $localize`Document "${newValues.title}" saved successfully.`
           )
-          this.networkActive = false
-          this.error = null
+          this.networkActive.set(false)
+          this.error.set(null)
           if (close) {
+            this.pendingIncomingUpdate = null
             this.close(() =>
-              this.openDocumentService.refreshDocument(this.documentId)
+              this.openDocumentService.refreshDocument(this.documentId())
             )
           } else {
-            this.openDocumentService.refreshDocument(this.documentId)
+            this.openDocumentService.refreshDocument(this.documentId())
+            this.flushPendingIncomingUpdate()
           }
           this.savedViewService.maybeRefreshDocumentCounts()
+          savedCallback?.()
         },
         error: (error) => {
-          this.networkActive = false
+          this.networkActive.set(false)
+          this.lastLocalSaveModified = null
           const canEdit =
             this.permissionsService.currentUserHasObjectPermissions(
               PermissionAction.Change,
-              this.document
+              this.document()
             )
           if (!canEdit) {
             // document was 'given away'
-            this.openDocumentService.setDirty(this.document, false)
-            this.toastService.showInfo(
-              $localize`Document "${this.document.title}" saved successfully.`
+            this.openDocumentService.setDirty(this.document(), false)
+            this.toastService.showSuccess(
+              $localize`Document "${this.document().title}" saved successfully.`
             )
             this.close()
           } else {
-            this.error = error.error
+            this.error.set(error.error)
             this.toastService.showError(
-              $localize`Error saving document "${this.document.title}"`,
+              $localize`Error saving document "${this.document().title}"`,
               error
             )
           }
+          this.flushPendingIncomingUpdate()
         },
       })
   }
 
   saveEditNext() {
-    this.networkActive = true
+    this.networkActive.set(true)
     this.store.next(this.documentForm.value)
     this.documentsService
-      .patch(this.getChangedFields())
+      .patch(this.getChangedFields(), this.selectedVersionId())
       .pipe(
         switchMap((updateResult) => {
           this.savedViewService.maybeRefreshDocumentCounts()
-          return this.documentListViewService.getNext(this.documentId).pipe(
+          return this.documentListViewService.getNext(this.documentId()).pipe(
             map((nextDocId) => ({ nextDocId, updateResult })),
             takeUntil(this.unsubscribeNotifier)
           )
@@ -922,9 +1412,9 @@ export class DocumentDetailComponent
       .pipe(
         switchMap(({ nextDocId, updateResult }) => {
           if (nextDocId && updateResult) {
-            this.openDocumentService.setDirty(this.document, false)
+            this.openDocumentService.setDirty(this.document(), false)
             return this.openDocumentService
-              .closeDocument(this.document)
+              .closeDocument(this.document())
               .pipe(
                 map(
                   (closeResult) => ({ updateResult, nextDocId, closeResult }),
@@ -937,24 +1427,29 @@ export class DocumentDetailComponent
       .pipe(first())
       .subscribe({
         next: ({ updateResult, nextDocId, closeResult }) => {
-          this.error = null
-          this.networkActive = false
+          this.closeIncomingUpdateModal()
+          this.error.set(null)
+          this.networkActive.set(false)
+          this.pendingIncomingUpdate = null
+          this.lastLocalSaveModified = null
           if (closeResult && updateResult && nextDocId) {
             this.router.navigate(['documents', nextDocId])
             this.titleInput?.focus()
           }
         },
         error: (error) => {
-          this.networkActive = false
-          this.error = error.error
+          this.networkActive.set(false)
+          this.lastLocalSaveModified = null
+          this.error.set(error.error)
           this.toastService.showError($localize`Error saving document`, error)
+          this.flushPendingIncomingUpdate()
         },
       })
   }
 
   close(closedCallback: () => void = null) {
     this.openDocumentService
-      .closeDocument(this.document)
+      .closeDocument(this.document())
       .pipe(first())
       .subscribe((closed) => {
         if (!closed) return
@@ -979,7 +1474,7 @@ export class DocumentDetailComponent
       backdrop: 'static',
     })
     modal.componentInstance.title = $localize`Confirm`
-    modal.componentInstance.messageBold = $localize`Do you really want to move the document "${this.document.title}" to the trash?`
+    modal.componentInstance.messageBold = $localize`Do you really want to move the document "${this.document().title}" to the trash?`
     modal.componentInstance.message = $localize`Documents can be restored prior to permanent deletion.`
     modal.componentInstance.btnClass = 'btn-danger'
     modal.componentInstance.btnCaption = $localize`Move to trash`
@@ -990,19 +1485,23 @@ export class DocumentDetailComponent
     modal.componentInstance.confirmClicked
       .pipe(
         switchMap(() => {
-          modal.componentInstance.buttonsEnabled = false
-          return this.documentsService.delete(this.document)
+          modal.componentInstance.buttonsEnabled.set(false)
+          return this.documentsService.delete(this.document())
         })
       )
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe({
         next: () => {
+          this.trashService.notifyMovedToTrash(
+            $localize`Moved "${this.document().title}" to the trash`,
+            [this.document().id]
+          )
           modal.close()
           this.close()
         },
         error: (error) => {
           this.toastService.showError($localize`Error deleting document`, error)
-          modal.componentInstance.buttonsEnabled = true
+          modal.componentInstance.buttonsEnabled.set(true)
           this.subscribeModalDelete(modal)
         },
       })
@@ -1012,13 +1511,13 @@ export class DocumentDetailComponent
     this.documentListViewService.quickFilter([
       {
         rule_type: FILTER_FULLTEXT_MORELIKE,
-        value: this.documentId.toString(),
+        value: this.documentId().toString(),
       },
     ])
   }
 
   reprocess() {
-    let modal = this.modalService.open(ConfirmDialogComponent, {
+    let modal = this.modalService.open(ReprocessConfirmDialogComponent, {
       backdrop: 'static',
     })
     modal.componentInstance.title = $localize`Reprocess confirm`
@@ -1027,13 +1526,16 @@ export class DocumentDetailComponent
     modal.componentInstance.btnClass = 'btn-danger'
     modal.componentInstance.btnCaption = $localize`Proceed`
     modal.componentInstance.confirmClicked.subscribe(() => {
-      modal.componentInstance.buttonsEnabled = false
+      modal.componentInstance.buttonsEnabled.set(false)
       this.documentsService
-        .bulkEdit([this.document.id], 'reprocess', {})
+        .reprocessDocuments(
+          { documents: [this.document().id] },
+          modal.componentInstance.remoteOcr
+        )
         .subscribe({
           next: () => {
             this.toastService.showInfo(
-              $localize`Reprocess operation for "${this.document.title}" will begin in the background. Close and re-open or reload this document after the operation has completed to see new content.`
+              $localize`Reprocess operation for "${this.document().title}" will begin in the background.`
             )
             if (modal) {
               modal.close()
@@ -1041,7 +1543,7 @@ export class DocumentDetailComponent
           },
           error: (error) => {
             if (modal) {
-              modal.componentInstance.buttonsEnabled = true
+              modal.componentInstance.buttonsEnabled.set(true)
             }
             this.toastService.showError(
               $localize`Error executing operation`,
@@ -1052,11 +1554,26 @@ export class DocumentDetailComponent
     })
   }
 
+  private getSelectedNonLatestVersionId(): number | null {
+    const versions = this.document()?.versions ?? []
+    if (!versions.length || !this.selectedVersionId()) {
+      return null
+    }
+    // The API returns versions newest first
+    const latestVersionId = versions[0].id
+    return this.selectedVersionId() === latestVersionId
+      ? null
+      : this.selectedVersionId()
+  }
+
   download(original: boolean = false) {
-    this.downloading = true
+    this.downloading.set(true)
+    const selectedVersionId = this.getSelectedNonLatestVersionId()
     const downloadUrl = this.documentsService.getDownloadUrl(
-      this.documentId,
-      original
+      this.documentId(),
+      original,
+      selectedVersionId,
+      this.useFormattedFilename
     )
     this.http
       .get(downloadUrl, { observe: 'response', responseType: 'blob' })
@@ -1065,11 +1582,11 @@ export class DocumentDetailComponent
           const contentDisposition = response.headers.get('Content-Disposition')
           const filename =
             getFilenameFromContentDisposition(contentDisposition) ||
-            this.document.title
+            this.document().title
           const blob = new Blob([response.body], {
             type: response.body.type,
           })
-          this.downloading = false
+          this.downloading.set(false)
           const file = new File([blob], filename, {
             type: response.body.type,
           })
@@ -1091,7 +1608,7 @@ export class DocumentDetailComponent
           }
         },
         error: (error) => {
-          this.downloading = false
+          this.downloading.set(false)
           this.toastService.showError(
             $localize`Error downloading document`,
             error
@@ -1101,16 +1618,16 @@ export class DocumentDetailComponent
   }
 
   hasNext() {
-    return this.documentListViewService.hasNext(this.documentId)
+    return this.documentListViewService.hasNext(this.documentId())
   }
 
   hasPrevious() {
-    return this.documentListViewService.hasPrevious(this.documentId)
+    return this.documentListViewService.hasPrevious(this.documentId())
   }
 
   nextDoc() {
     this.documentListViewService
-      .getNext(this.document.id)
+      .getNext(this.document().id)
       .subscribe((nextDocId: number) => {
         this.router.navigate(['documents', nextDocId])
       })
@@ -1118,58 +1635,59 @@ export class DocumentDetailComponent
 
   previousDoc() {
     this.documentListViewService
-      .getPrevious(this.document.id)
+      .getPrevious(this.document().id)
       .subscribe((prevDocId: number) => {
         this.router.navigate(['documents', prevDocId])
       })
   }
 
-  pdfPreviewLoaded(pdf: PDFDocumentProxy) {
-    this.previewNumPages = pdf.numPages
+  pdfPreviewLoaded(pdf: PngxPdfDocumentProxy) {
+    this.previewNumPages.set(pdf.numPages)
     if (this.password) this.requiresPassword = false
-    setTimeout(() => {
-      this.previewLoaded = true
-    }, 300)
+    this.previewLoaded.set(true)
   }
 
   onError(event) {
     if (event.name == 'PasswordException') {
       this.requiresPassword = true
-      this.previewLoaded = true
+      this.previewLoaded.set(true)
     }
   }
 
   onPasswordKeyUp(event: KeyboardEvent) {
     if ('Enter' == event.key) {
       this.password = (event.target as HTMLInputElement).value
+      this.updatePdfSource()
     }
   }
 
-  setZoom(setting: ZoomSetting) {
-    if (ZoomSetting.PageFit === setting || ZoomSetting.PageWidth === setting) {
-      this.previewZoomScale = setting
-      this.previewZoomSetting = ZoomSetting.One
-    } else {
-      this.previewZoomSetting = setting
-      this.previewZoomScale = ZoomSetting.PageWidth
+  setZoom(setting: PdfZoomScale | PdfZoomLevel) {
+    if (
+      setting === PdfZoomScale.PageFit ||
+      setting === PdfZoomScale.PageWidth
+    ) {
+      this.previewZoomScale.set(setting)
+      this.previewZoomSetting.set(PdfZoomLevel.One)
+      return
     }
+    this.previewZoomSetting.set(setting)
+    this.previewZoomScale.set(PdfZoomScale.PageWidth)
   }
 
   get zoomSettings() {
-    return Object.values(ZoomSetting).filter(
-      (setting) => setting !== ZoomSetting.PageWidth
-    )
+    return [PdfZoomScale.PageFit, ...Object.values(PdfZoomLevel)]
   }
 
   get currentZoom() {
-    if (this.previewZoomScale === ZoomSetting.PageFit) {
-      return ZoomSetting.PageFit
-    } else return this.previewZoomSetting
+    if (this.previewZoomScale() === PdfZoomScale.PageFit) {
+      return PdfZoomScale.PageFit
+    }
+    return this.previewZoomSetting()
   }
 
-  getZoomSettingTitle(setting: ZoomSetting): string {
+  getZoomSettingTitle(setting: PdfZoomScale | PdfZoomLevel): string {
     switch (setting) {
-      case ZoomSetting.PageFit:
+      case PdfZoomScale.PageFit:
         return $localize`Page Fit`
       default:
         return `${parseFloat(setting) * 100}%`
@@ -1177,25 +1695,25 @@ export class DocumentDetailComponent
   }
 
   increaseZoom(): void {
-    let currentIndex = Object.values(ZoomSetting).indexOf(
-      this.previewZoomSetting
+    const zoomLevels = Object.values(PdfZoomLevel)
+    let currentIndex = zoomLevels.indexOf(this.previewZoomSetting())
+    if (this.previewZoomScale() === PdfZoomScale.PageFit) {
+      currentIndex = zoomLevels.indexOf(PdfZoomLevel.One)
+    }
+    this.previewZoomScale.set(PdfZoomScale.PageWidth)
+    this.previewZoomSetting.set(
+      zoomLevels[Math.min(zoomLevels.length - 1, currentIndex + 1)]
     )
-    if (this.previewZoomScale === ZoomSetting.PageFit) currentIndex = 5
-    this.previewZoomScale = ZoomSetting.PageWidth
-    this.previewZoomSetting =
-      Object.values(ZoomSetting)[
-        Math.min(Object.values(ZoomSetting).length - 1, currentIndex + 1)
-      ]
   }
 
   decreaseZoom(): void {
-    let currentIndex = Object.values(ZoomSetting).indexOf(
-      this.previewZoomSetting
-    )
-    if (this.previewZoomScale === ZoomSetting.PageFit) currentIndex = 4
-    this.previewZoomScale = ZoomSetting.PageWidth
-    this.previewZoomSetting =
-      Object.values(ZoomSetting)[Math.max(2, currentIndex - 1)]
+    const zoomLevels = Object.values(PdfZoomLevel)
+    let currentIndex = zoomLevels.indexOf(this.previewZoomSetting())
+    if (this.previewZoomScale() === PdfZoomScale.PageFit) {
+      currentIndex = zoomLevels.indexOf(PdfZoomLevel.ThreeQuarters)
+    }
+    this.previewZoomScale.set(PdfZoomScale.PageWidth)
+    this.previewZoomSetting.set(zoomLevels[Math.max(0, currentIndex - 1)])
   }
 
   get showPermissions(): boolean {
@@ -1229,33 +1747,35 @@ export class DocumentDetailComponent
   }
 
   notesUpdated(notes: DocumentNote[]) {
-    this.document.notes = notes
-    this.openDocumentService.refreshDocument(this.documentId)
+    this.document().notes = notes
+    this.openDocumentService.refreshDocument(this.documentId())
     this.savedViewService.maybeRefreshDocumentCounts()
   }
 
   get userIsOwner(): boolean {
-    let doc: Document = Object.assign({}, this.document)
+    let doc: Document = { ...this.document() }
     // dont disable while editing
     if (
-      this.document &&
+      this.document() &&
       this.store?.value.permissions_form?.hasOwnProperty('owner')
     ) {
       doc.owner = this.store.value.permissions_form.owner
     }
-    return !this.document || this.permissionsService.currentUserOwnsObject(doc)
+    return (
+      !this.document() || this.permissionsService.currentUserOwnsObject(doc)
+    )
   }
 
   get userCanEdit(): boolean {
-    let doc: Document = Object.assign({}, this.document)
+    let doc: Document = { ...this.document() }
     // dont disable while editing
     if (
-      this.document &&
+      this.document() &&
       this.store?.value.permissions_form?.hasOwnProperty('owner')
     ) {
       doc.owner = this.store.value.permissions_form.owner
     }
-    return !this.document || this.userCanEditDoc(doc)
+    return !this.document() || this.userCanEditDoc(doc)
   }
 
   private userCanEditDoc(doc: Document): boolean {
@@ -1329,7 +1849,7 @@ export class DocumentDetailComponent
     this.customFieldsService
       .listAll()
       .pipe(first(), takeUntil(this.unsubscribeNotifier))
-      .subscribe((result) => (this.customFields = result.results))
+      .subscribe((result) => this.customFields.set(result.results))
   }
 
   public refreshCustomFields() {
@@ -1340,17 +1860,17 @@ export class DocumentDetailComponent
   public getCustomFieldFromInstance(
     instance: CustomFieldInstance
   ): CustomField {
-    return this.customFields?.find((f) => f.id === instance.field)
+    return this.customFields()?.find((f) => f.id === instance.field)
   }
 
   public getCustomFieldError(index: number) {
-    const fieldError = this.error?.custom_fields?.[index]
+    const fieldError = this.error()?.custom_fields?.[index]
     return fieldError?.['non_field_errors'] ?? fieldError?.['value']
   }
 
   private updateFormForCustomFields(emitEvent: boolean = false) {
     this.customFieldFormFields.clear({ emitEvent: false })
-    this.document.custom_fields?.forEach((fieldInstance) => {
+    this.document().custom_fields?.forEach((fieldInstance) => {
       this.customFieldFormFields.push(
         new FormGroup({
           field: new FormControl(fieldInstance.field),
@@ -1362,10 +1882,10 @@ export class DocumentDetailComponent
   }
 
   public addField(field: CustomField) {
-    this.document.custom_fields.push({
+    this.document().custom_fields.push({
       field: field.id,
       value: null,
-      document: this.documentId,
+      document: this.documentId(),
       created: new Date(),
     })
     this.updateFormForCustomFields(true)
@@ -1374,8 +1894,8 @@ export class DocumentDetailComponent
   }
 
   public removeField(fieldInstance: CustomFieldInstance) {
-    this.document.custom_fields.splice(
-      this.document.custom_fields.indexOf(fieldInstance),
+    this.document().custom_fields.splice(
+      this.document().custom_fields.indexOf(fieldInstance),
       1
     )
     this.updateFormForCustomFields(true)
@@ -1389,35 +1909,38 @@ export class DocumentDetailComponent
       size: 'xl',
       scrollable: true,
     })
+    const sourceDocumentId = this.selectedVersionId() ?? this.document().id
     modal.componentInstance.title = $localize`PDF Editor`
     modal.componentInstance.btnCaption = $localize`Proceed`
-    modal.componentInstance.documentID = this.document.id
+    modal.componentInstance.documentID.set(this.document().id)
+    modal.componentInstance.versionID.set(sourceDocumentId)
     modal.componentInstance.confirmClicked
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(() => {
-        modal.componentInstance.buttonsEnabled = false
+        modal.componentInstance.buttonsEnabled.set(false)
         this.documentsService
-          .bulkEdit([this.document.id], 'edit_pdf', {
+          .editPdfDocuments([sourceDocumentId], {
             operations: modal.componentInstance.getOperations(),
             delete_original: modal.componentInstance.deleteOriginal,
             update_document:
               modal.componentInstance.editMode == PdfEditorEditMode.Update,
             include_metadata: modal.componentInstance.includeMetadata,
+            source_mode: BulkEditSourceMode.EXPLICIT_SELECTION,
           })
           .pipe(first(), takeUntil(this.unsubscribeNotifier))
           .subscribe({
             next: () => {
               this.toastService.showInfo(
-                $localize`PDF edit operation for "${this.document.title}" will begin in the background.`
+                $localize`PDF edit operation for "${this.document().title}" will begin in the background.`
               )
               modal.close()
               if (modal.componentInstance.deleteOriginal) {
-                this.openDocumentService.closeDocument(this.document)
+                this.openDocumentService.closeDocument(this.document())
               }
             },
             error: (error) => {
               if (modal) {
-                modal.componentInstance.buttonsEnabled = true
+                modal.componentInstance.buttonsEnabled.set(true)
               }
               this.toastService.showError(
                 $localize`Error executing PDF edit operation`,
@@ -1428,10 +1951,72 @@ export class DocumentDetailComponent
       })
   }
 
+  removePassword() {
+    if (this.requiresPassword || !this.password) {
+      this.toastService.showError(
+        $localize`Please enter the current password before attempting to remove it.`
+      )
+      return
+    }
+    const modal = this.modalService.open(
+      PasswordRemovalConfirmDialogComponent,
+      {
+        backdrop: 'static',
+      }
+    )
+    modal.componentInstance.title = $localize`Remove password protection`
+    modal.componentInstance.message = $localize`Create an unprotected copy or replace the existing file.`
+    modal.componentInstance.btnCaption = $localize`Start`
+
+    modal.componentInstance.confirmClicked
+      .pipe(takeUntil(this.unsubscribeNotifier))
+      .subscribe(() => {
+        const sourceDocumentId = this.selectedVersionId() ?? this.document().id
+        const dialog =
+          modal.componentInstance as PasswordRemovalConfirmDialogComponent
+        dialog.buttonsEnabled.set(false)
+        this.networkActive.set(true)
+        this.documentsService
+          .removePasswordDocuments([sourceDocumentId], {
+            password: this.password,
+            update_document: dialog.updateDocument,
+            include_metadata: dialog.includeMetadata,
+            delete_original: dialog.deleteOriginal,
+            source_mode: BulkEditSourceMode.EXPLICIT_SELECTION,
+          })
+          .pipe(first(), takeUntil(this.unsubscribeNotifier))
+          .subscribe({
+            next: () => {
+              this.toastService.showInfo(
+                $localize`Password removal operation for "${this.document().title}" will begin in the background.`
+              )
+              this.networkActive.set(false)
+              modal.close()
+              if (!dialog.updateDocument && dialog.deleteOriginal) {
+                this.openDocumentService.closeDocument(this.document())
+              } else if (dialog.updateDocument) {
+                this.openDocumentService.refreshDocument(this.documentId())
+              }
+            },
+            error: (error) => {
+              dialog.buttonsEnabled.set(true)
+              this.networkActive.set(false)
+              this.toastService.showError(
+                $localize`Error executing password removal operation`,
+                error
+              )
+            },
+          })
+      })
+  }
+
   printDocument() {
+    this.cleanupPrintDocument()
+    const selectedVersionId = this.getSelectedNonLatestVersionId()
     const printUrl = this.documentsService.getDownloadUrl(
-      this.document.id,
-      false
+      this.document().id,
+      false,
+      selectedVersionId
     )
     this.http
       .get(printUrl, { responseType: 'blob' })
@@ -1440,31 +2025,38 @@ export class DocumentDetailComponent
         next: (blob) => {
           const blobUrl = URL.createObjectURL(blob)
           const iframe = document.createElement('iframe')
-          iframe.style.display = 'none'
+          this.printIframe = iframe
+          this.printBlobUrl = blobUrl
+          iframe.style.position = 'fixed'
+          iframe.style.right = '0'
+          iframe.style.bottom = '0'
+          iframe.style.width = '0'
+          iframe.style.height = '0'
+          iframe.style.border = '0'
+          iframe.style.visibility = 'hidden'
           iframe.src = blobUrl
           document.body.appendChild(iframe)
           iframe.onload = () => {
-            try {
-              iframe.contentWindow.focus()
-              iframe.contentWindow.print()
-              iframe.contentWindow.onafterprint = () => {
-                document.body.removeChild(iframe)
-                URL.revokeObjectURL(blobUrl)
+            timer(0).subscribe(() => {
+              try {
+                iframe.contentWindow.focus()
+                iframe.contentWindow.print()
+                iframe.contentWindow.onafterprint = () => {
+                  this.cleanupPrintDocument()
+                }
+              } catch (err) {
+                // FF throws cross-origin error on onafterprint
+                const isCrossOriginAfterPrintError =
+                  err instanceof DOMException &&
+                  err.message.includes('onafterprint')
+                // FF throws here while print preview is still reading the iframe
+                // so keep it alive until the next print or teardown
+                if (!isCrossOriginAfterPrintError) {
+                  this.toastService.showError($localize`Print failed.`, err)
+                  timer(100).subscribe(() => this.cleanupPrintDocument())
+                }
               }
-            } catch (err) {
-              // FF throws cross-origin error on onafterprint
-              const isCrossOriginAfterPrintError =
-                err instanceof DOMException &&
-                err.message.includes('onafterprint')
-              if (!isCrossOriginAfterPrintError) {
-                this.toastService.showError($localize`Print failed.`, err)
-              }
-              timer(100).subscribe(() => {
-                // delay to avoid FF print failure
-                document.body.removeChild(iframe)
-                URL.revokeObjectURL(blobUrl)
-              })
-            }
+            })
           }
         },
         error: () => {
@@ -1475,11 +2067,24 @@ export class DocumentDetailComponent
       })
   }
 
+  private cleanupPrintDocument() {
+    if (this.printIframe) this.printIframe.remove()
+    this.printIframe = null
+    if (this.printBlobUrl) {
+      URL.revokeObjectURL(this.printBlobUrl)
+      this.printBlobUrl = null
+    }
+  }
+
   public openShareLinks() {
     const modal = this.modalService.open(ShareLinksDialogComponent)
-    modal.componentInstance.documentId = this.document.id
-    modal.componentInstance.hasArchiveVersion =
-      !!this.document?.archived_file_name
+    modal.componentInstance.documentId.set(
+      this.selectedVersionId() ?? this.document().id
+    )
+    modal.componentInstance.hasArchiveVersion.set(
+      this.metadata()?.has_archive_version ??
+        !!this.document()?.archived_file_name
+    )
   }
 
   get emailEnabled(): boolean {
@@ -1490,14 +2095,18 @@ export class DocumentDetailComponent
     const modal = this.modalService.open(EmailDocumentDialogComponent, {
       backdrop: 'static',
     })
-    modal.componentInstance.documentIds = [this.document.id]
-    modal.componentInstance.hasArchiveVersion =
-      !!this.document?.archived_file_name
+    modal.componentInstance.documentIds.set([
+      this.selectedVersionId() ?? this.document().id,
+    ])
+    modal.componentInstance.hasArchiveVersion.set(
+      this.metadata()?.has_archive_version ??
+        !!this.document()?.archived_file_name
+    )
   }
 
   private tryRenderTiff() {
     this.http
-      .get(this.previewUrl, { responseType: 'arraybuffer' })
+      .get(this.previewUrl(), { responseType: 'arraybuffer' })
       .pipe(
         first(),
         takeUntil(this.unsubscribeNotifier),
@@ -1532,13 +2141,17 @@ export class DocumentDetailComponent
               imgd = ctx.createImageData(w, h)
             for (var i = 0; i < rgba.length; i++) imgd.data[i] = rgba[i]
             ctx.putImageData(imgd, 0, 0)
-            this.tiffURL = cnv.toDataURL()
+            this.tiffURL.set(cnv.toDataURL())
           } catch (err) {
-            this.tiffError = $localize`An error occurred loading tiff: ${err.toString()}`
+            this.tiffError.set(
+              $localize`An error occurred loading tiff: ${err.toString()}`
+            )
           }
         },
         error: (err) => {
-          this.tiffError = $localize`An error occurred loading tiff: ${err.toString()}`
+          this.tiffError.set(
+            $localize`An error occurred loading tiff: ${err.toString()}`
+          )
         },
       })
   }

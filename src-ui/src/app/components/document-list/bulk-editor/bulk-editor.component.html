@@ -10,7 +10,7 @@
         [createRef]="createTag.bind(this)"
         (opened)="openTagsDropdown()"
         [(selectionModel)]="tagSelectionModel"
-        [documentCounts]="tagDocumentCounts"
+        [documentCounts]="tagDocumentCounts()"
         (apply)="setTags($event)"
         shortcutKey="t">
       </pngx-filterable-dropdown>
@@ -24,7 +24,7 @@
         [createRef]="createCorrespondent.bind(this)"
         (opened)="openCorrespondentDropdown()"
         [(selectionModel)]="correspondentSelectionModel"
-        [documentCounts]="correspondentDocumentCounts"
+        [documentCounts]="correspondentDocumentCounts()"
         (apply)="setCorrespondents($event)"
         shortcutKey="y">
       </pngx-filterable-dropdown>
@@ -38,7 +38,7 @@
         [createRef]="createDocumentType.bind(this)"
         (opened)="openDocumentTypeDropdown()"
         [(selectionModel)]="documentTypeSelectionModel"
-        [documentCounts]="documentTypeDocumentCounts"
+        [documentCounts]="documentTypeDocumentCounts()"
         (apply)="setDocumentTypes($event)"
         shortcutKey="u">
       </pngx-filterable-dropdown>
@@ -52,7 +52,7 @@
         [createRef]="createStoragePath.bind(this)"
         (opened)="openStoragePathDropdown()"
         [(selectionModel)]="storagePathsSelectionModel"
-        [documentCounts]="storagePathDocumentCounts"
+        [documentCounts]="storagePathDocumentCounts()"
         (apply)="setStoragePaths($event)"
         shortcutKey="i">
       </pngx-filterable-dropdown>
@@ -66,7 +66,7 @@
         [createRef]="createCustomField.bind(this)"
         (opened)="openCustomFieldsDropdown()"
         [(selectionModel)]="customFieldsSelectionModel"
-        [documentCounts]="customFieldDocumentCounts"
+        [documentCounts]="customFieldDocumentCounts()"
         extraButtonTitle="Set values"
         i18n-extraButtonTitle
         (extraButton)="setCustomFieldValues($event)"
@@ -74,50 +74,84 @@
       </pngx-filterable-dropdown>
     }
     <div class="btn-group">
-      <button type="button" class="btn btn-sm btn-outline-primary me-2" (click)="setPermissions()" [disabled]="!userOwnsAll || !userCanEditAll">
-        <i-bs name="person-fill-lock"></i-bs><div class="d-none d-sm-inline">&nbsp;<ng-container i18n>Permissions</ng-container></div>
+      <button type="button" class="btn btn-sm btn-outline-primary me-2" (click)="setPermissions()" [disabled]="!userOwnsAll || !userCanEditAll" aria-label="Permissions" i18n-aria-label>
+        <i-bs name="person-fill-lock"></i-bs><div class="d-none d-sm-inline ms-1"><ng-container i18n>Permissions</ng-container></div>
       </button>
     </div>
   </div>
   <div class="d-flex align-items-center gap-2 ms-auto">
     <div class="btn-toolbar">
       <div ngbDropdown>
-        <button class="btn btn-sm btn-outline-primary" id="dropdownSelect" [disabled]="!userCanEdit && !userCanAdd" ngbDropdownToggle>
-          <i-bs name="three-dots"></i-bs>
-          <div class="d-none d-sm-inline">&nbsp;<ng-container i18n>Actions</ng-container></div>
+        <button class="btn btn-sm btn-outline-primary" id="dropdownSelect" [disabled]="!userCanEdit && !userCanAdd" ngbDropdownToggle aria-label="Actions" i18n-aria-label>
+          <i-bs name="three-dots"></i-bs><div class="d-none d-sm-inline ms-1"><ng-container i18n>Actions</ng-container></div>
         </button>
         <div ngbDropdownMenu aria-labelledby="dropdownSelect" class="shadow">
           <button ngbDropdownItem (click)="reprocessSelected()" [disabled]="!userCanEditAll && !userCanEditAll">
-            <i-bs name="body-text"></i-bs>&nbsp;<ng-container i18n>Reprocess</ng-container>
+            <i-bs name="body-text" class="me-2"></i-bs><ng-container i18n>Reprocess</ng-container>
           </button>
           <button ngbDropdownItem (click)="rotateSelected()" [disabled]="!userOwnsAll && !userCanEditAll">
-            <i-bs name="arrow-clockwise"></i-bs>&nbsp;<ng-container i18n>Rotate</ng-container>
+            <i-bs name="arrow-clockwise" class="me-2"></i-bs><ng-container i18n>Rotate</ng-container>
           </button>
-          <button ngbDropdownItem (click)="mergeSelected()" [disabled]="!userCanAdd || list.selected.size < 2">
-            <i-bs name="journals"></i-bs>&nbsp;<ng-container i18n>Merge</ng-container>
+          <button ngbDropdownItem (click)="mergeSelected()" [disabled]="!userCanAdd || list.allSelected || list.selectedCount < 2">
+            <i-bs name="journals" class="me-2"></i-bs><ng-container i18n>Merge</ng-container>
           </button>
-          @if (emailEnabled) {
-            <button ngbDropdownItem (click)="emailSelected()">
-              <i-bs name="envelope"></i-bs>&nbsp;<ng-container i18n>Email</ng-container>
-            </button>
-          }
+          <button ngbDropdownItem (click)="mergeSelectedAsVersions()" [disabled]="!userOwnsAll || !userCanEditAll || !userCanDelete || list.allSelected || list.selectedCount < 2">
+            <i-bs name="journal-bookmark-fill" class="me-2"></i-bs><ng-container i18n>Merge as versions</ng-container>
+          </button>
         </div>
       </div>
     </div>
+    <div class="btn-toolbar" ngbDropdown>
+      <button
+        class="btn btn-sm btn-outline-primary"
+        id="dropdownSend"
+        ngbDropdownToggle
+        [disabled]="disabled || !canSendSelection"
+        aria-label="Send"
+        i18n-aria-label
+      >
+        <i-bs name="send"></i-bs><div class="d-none d-sm-inline ms-1"><ng-container i18n>Send</ng-container>
+        </div>
+      </button>
+      <div ngbDropdownMenu aria-labelledby="dropdownSend" class="shadow">
+        @if (permissionService.currentUserCan(PermissionAction.Add, PermissionType.ShareLinkBundle)) {
+          <button ngbDropdownItem (click)="createShareLinkBundle()" [disabled]="!canSendSelection">
+            <i-bs name="link" class="me-2"></i-bs><ng-container i18n>Create a share link bundle</ng-container>
+          </button>
+        }
+        @if (permissionService.currentUserCan(PermissionAction.View, PermissionType.ShareLinkBundle)) {
+          <button ngbDropdownItem (click)="manageShareLinkBundles()">
+            <i-bs name="list-ul" class="me-2"></i-bs><ng-container i18n>Manage share link bundles</ng-container>
+          </button>
+        }
+        @if (
+          emailEnabled &&
+          (permissionService.currentUserCan(PermissionAction.Add, PermissionType.ShareLinkBundle) ||
+            permissionService.currentUserCan(PermissionAction.View, PermissionType.ShareLinkBundle))
+        ) {
+          <div class="dropdown-divider"></div>
+        }
+        @if (emailEnabled) {
+          <button ngbDropdownItem (click)="emailSelected()" [disabled]="!canSendSelection">
+            <i-bs name="envelope" class="me-2"></i-bs><ng-container i18n>Email</ng-container>
+          </button>
+        }
+      </div>
+    </div>
     <div class="btn-group btn-group-sm">
-      <button class="btn btn-sm btn-outline-primary" [disabled]="awaitingDownload" (click)="downloadSelected()">
-        @if (!awaitingDownload) {
+      <button class="btn btn-sm btn-outline-primary" [disabled]="awaitingDownload()" (click)="downloadSelected()" aria-label="Download" i18n-aria-label>
+        @if (!awaitingDownload()) {
           <i-bs name="arrow-down"></i-bs>
         }
-        @if (awaitingDownload) {
+        @if (awaitingDownload()) {
           <div class="spinner-border spinner-border-sm" role="status">
             <span class="visually-hidden">Preparing download...</span>
           </div>
         }
-        <div class="d-none d-sm-inline">&nbsp;<ng-container i18n>Download</ng-container></div>
+        <div class="d-none d-sm-inline ms-1"><ng-container i18n>Download</ng-container></div>
       </button>
       <div ngbDropdown class="me-2 d-flex btn-group" role="group">
-        <button type="button" class="btn btn-sm btn-outline-primary dropdown-toggle-split rounded-end" ngbDropdownToggle></button>
+        <button type="button" class="btn btn-sm btn-outline-primary dropdown-toggle-split rounded-end" ngbDropdownToggle aria-label="Download options" i18n-aria-label></button>
         <div ngbDropdownMenu aria-labelledby="dropdownSelect" class="shadow">
           <form [formGroup]="downloadForm" class="px-3 py-1">
             <p class="mb-1" i18n>Include:</p>
@@ -142,7 +176,7 @@
 
     <div class="btn-group btn-group-sm">
       <button type="button" class="btn btn-sm btn-outline-danger" (click)="applyDelete()" *pngxIfPermissions="{ action: PermissionAction.Delete, type: PermissionType.Document }" [disabled]="!userOwnsAll">
-        <i-bs name="trash"></i-bs>&nbsp;<ng-container i18n>Delete</ng-container>
+        <i-bs name="trash" class="me-1"></i-bs><ng-container i18n>Delete</ng-container>
       </button>
     </div>
   </div>

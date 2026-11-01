@@ -14,12 +14,15 @@ logger = logging.getLogger("paperless.auth")
 
 
 class AutoLoginMiddleware(MiddlewareMixin):
-    def process_request(self, request: HttpRequest):
+    def process_request(self, request: HttpRequest) -> None:
         # Dont use auto-login with token request
-        if request.path.startswith("/api/token/") and request.method == "POST":
+        if request.path_info.startswith("/api/token/") and request.method == "POST":
             return None
         try:
-            request.user = User.objects.get(username=settings.AUTO_LOGIN_USERNAME)
+            request.user = User.objects.get(
+                username=settings.AUTO_LOGIN_USERNAME,
+                is_active=True,
+            )
             auth.login(
                 request=request,
                 user=request.user,
@@ -83,3 +86,11 @@ class PaperlessBasicAuthentication(authentication.BasicAuthentication):
             raise exceptions.AuthenticationFailed("MFA required")
 
         return user_tuple
+
+    def authenticate_header(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        if auth_header.lower().startswith("basic "):
+            return super().authenticate_header(request)
+
+        # Still 401 for anonymous API access
+        return authentication.TokenAuthentication.keyword

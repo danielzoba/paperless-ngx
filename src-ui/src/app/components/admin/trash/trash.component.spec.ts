@@ -60,8 +60,13 @@ describe('TrashComponent', () => {
     modalService = TestBed.inject(NgbModal)
     toastService = TestBed.inject(ToastService)
     router = TestBed.inject(Router)
+    jest.spyOn(router, 'navigate').mockResolvedValue(true)
     component = fixture.componentInstance
     fixture.detectChanges()
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
   })
 
   it('should call correct service method on reload', () => {
@@ -77,7 +82,7 @@ describe('TrashComponent', () => {
     component.reload()
     jest.advanceTimersByTime(100)
     expect(trashSpy).toHaveBeenCalled()
-    expect(component.documentsInTrash).toEqual(documentsInTrash)
+    expect(component.documentsInTrash()).toEqual(documentsInTrash)
   })
 
   it('should support delete document, show error if needed', () => {
@@ -94,11 +99,16 @@ describe('TrashComponent', () => {
     modal.componentInstance.confirmClicked.next()
     expect(toastErrorSpy).toHaveBeenCalled()
 
+    let toasts
+    toastService.getToasts().subscribe((allToasts) => {
+      toasts = [...allToasts]
+    })
     trashSpy.mockReturnValue(of('OK'))
     component.delete(documentsInTrash[0])
     expect(modal).toBeDefined()
     modal.componentInstance.confirmClicked.next()
     expect(trashSpy).toHaveBeenCalled()
+    expect(toasts[0].content).toContain('deleted')
   })
 
   it('should support empty trash, show error if needed', () => {
@@ -179,8 +189,8 @@ describe('TrashComponent', () => {
   })
 
   it('should support toggle all items in view', () => {
-    component.documentsInTrash = documentsInTrash
-    expect(component.selectedDocuments.size).toEqual(0)
+    component.documentsInTrash.set(documentsInTrash)
+    expect(component.selectedDocuments().size).toEqual(0)
     const toggleAllSpy = jest.spyOn(component, 'toggleAll')
     const checkButton = fixture.debugElement.queryAll(
       By.css('input.form-check-input')
@@ -189,21 +199,21 @@ describe('TrashComponent', () => {
     checkButton.nativeElement.checked = true
     checkButton.nativeElement.dispatchEvent(new Event('click'))
     expect(toggleAllSpy).toHaveBeenCalled()
-    expect(component.selectedDocuments.size).toEqual(documentsInTrash.length)
+    expect(component.selectedDocuments().size).toEqual(documentsInTrash.length)
   })
 
   it('should support toggle item', () => {
-    component.selectedDocuments = new Set([1])
+    component.selectedDocuments.set(new Set([1]))
     component.toggleSelected(documentsInTrash[0])
-    expect(component.selectedDocuments.size).toEqual(0)
+    expect(component.selectedDocuments().size).toEqual(0)
     component.toggleSelected(documentsInTrash[0])
-    expect(component.selectedDocuments.size).toEqual(1)
+    expect(component.selectedDocuments().size).toEqual(1)
   })
 
   it('should support clear selection', () => {
-    component.selectedDocuments = new Set([1])
+    component.selectedDocuments.set(new Set([1]))
     component.clearSelection()
-    expect(component.selectedDocuments.size).toEqual(0)
+    expect(component.selectedDocuments().size).toEqual(0)
   })
 
   it('should correctly display days remaining', () => {

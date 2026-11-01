@@ -1,15 +1,15 @@
-import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
+import {
+  HttpRequest,
+  provideHttpClient,
+  withInterceptorsFromDi,
+} from '@angular/common/http'
 import {
   HttpTestingController,
   provideHttpClientTesting,
 } from '@angular/common/http/testing'
 import { TestBed } from '@angular/core/testing'
 import { environment } from 'src/environments/environment'
-import {
-  PaperlessTaskName,
-  PaperlessTaskStatus,
-  PaperlessTaskType,
-} from '../data/paperless-task'
+import { PaperlessTaskType } from '../data/paperless-task'
 import { TasksService } from './tasks.service'
 
 describe('TasksService', () => {
@@ -34,20 +34,78 @@ describe('TasksService', () => {
     httpTestingController.verify()
   })
 
-  it('calls tasks api endpoint on reload', () => {
+  it('calls tasks status counts api endpoint on reload', () => {
     tasksService.reload()
     const req = httpTestingController.expectOne(
-      `${environment.apiBaseUrl}tasks/?task_name=consume_file&acknowledged=false`
+      (req: HttpRequest<unknown>) =>
+        req.url === `${environment.apiBaseUrl}tasks/status_counts/` &&
+        req.params.get('acknowledged') === 'false'
     )
     expect(req.request.method).toEqual('GET')
+    req.flush({ all: 5, needs_attention: 3, in_progress: 1, completed: 1 })
+    expect(tasksService.needsAttentionTasksCount).toEqual(3)
   })
 
-  it('does not call tasks api endpoint on reload if already loading', () => {
-    tasksService.loading = true
+  it('cancels an in-progress reload when reloading again', () => {
     tasksService.reload()
-    httpTestingController.expectNone(
-      `${environment.apiBaseUrl}tasks/?task_name=consume_file&acknowledged=false`
+    const staleReload = httpTestingController.expectOne(
+      (req: HttpRequest<unknown>) =>
+        req.url === `${environment.apiBaseUrl}tasks/status_counts/`
     )
+    tasksService.reload()
+
+    expect(staleReload.cancelled).toBe(true)
+    httpTestingController
+      .expectOne(
+        (req: HttpRequest<unknown>) =>
+          req.url === `${environment.apiBaseUrl}tasks/status_counts/`
+      )
+      .flush({ all: 0, needs_attention: 0, in_progress: 0, completed: 0 })
+  })
+
+  it('continues reloading after a reload request fails', () => {
+    tasksService.reload()
+    httpTestingController
+      .expectOne(
+        (req: HttpRequest<unknown>) =>
+          req.url === `${environment.apiBaseUrl}tasks/status_counts/`
+      )
+      .flush('error', { status: 500, statusText: 'error' })
+
+    expect(tasksService.loading).toBe(false)
+
+    tasksService.reload()
+    httpTestingController
+      .expectOne(
+        (req: HttpRequest<unknown>) =>
+          req.url === `${environment.apiBaseUrl}tasks/status_counts/`
+      )
+      .flush({ all: 0, needs_attention: 0, in_progress: 0, completed: 0 })
+  })
+
+  it('reloads after dismissing a task while a reload is already in progress', () => {
+    tasksService.reload()
+    const staleReload = httpTestingController.expectOne(
+      (req: HttpRequest<unknown>) =>
+        req.url === `${environment.apiBaseUrl}tasks/status_counts/` &&
+        req.params.get('acknowledged') === 'false'
+    )
+
+    tasksService.dismissTasks(new Set([1])).subscribe()
+    httpTestingController
+      .expectOne(`${environment.apiBaseUrl}tasks/acknowledge/`)
+      .flush([])
+
+    expect(staleReload.cancelled).toBe(true)
+    httpTestingController
+      .expectOne(
+        (req: HttpRequest<unknown>) =>
+          req.url === `${environment.apiBaseUrl}tasks/status_counts/` &&
+          req.params.get('acknowledged') === 'false'
+      )
+      .flush({ all: 50, needs_attention: 42, in_progress: 3, completed: 5 })
+
+    expect(tasksService.needsAttentionTasksCount).toEqual(42)
   })
 
   it('calls acknowledge_tasks api endpoint on dismiss and reloads', () => {
@@ -63,80 +121,37 @@ describe('TasksService', () => {
     // reload is then called
     httpTestingController
       .expectOne(
-        `${environment.apiBaseUrl}tasks/?task_name=consume_file&acknowledged=false`
+        (req: HttpRequest<unknown>) =>
+          req.url === `${environment.apiBaseUrl}tasks/status_counts/` &&
+          req.params.get('acknowledged') === 'false'
       )
-      .flush([])
+      .flush({ all: 0, needs_attention: 0, in_progress: 0, completed: 0 })
   })
 
-  it('sorts tasks returned from api', () => {
-    expect(tasksService.total).toEqual(0)
-    const mockTasks = [
-      {
-        type: PaperlessTaskType.Auto,
-        task_name: PaperlessTaskName.ConsumeFile,
-        status: PaperlessTaskStatus.Complete,
-        acknowledged: false,
-        task_id: '1234',
-        task_file_name: 'file1.pdf',
-        date_created: new Date(),
-      },
-      {
-        type: PaperlessTaskType.Auto,
-        task_name: PaperlessTaskName.ConsumeFile,
-        status: PaperlessTaskStatus.Failed,
-        acknowledged: false,
-        task_id: '1235',
-        task_file_name: 'file2.pdf',
-        date_created: new Date(),
-      },
-      {
-        type: PaperlessTaskType.Auto,
-        task_name: PaperlessTaskName.ConsumeFile,
-        status: PaperlessTaskStatus.Pending,
-        acknowledged: false,
-        task_id: '1236',
-        task_file_name: 'file3.pdf',
-        date_created: new Date(),
-      },
-      {
-        type: PaperlessTaskType.Auto,
-        task_name: PaperlessTaskName.ConsumeFile,
-        status: PaperlessTaskStatus.Started,
-        acknowledged: false,
-        task_id: '1237',
-        task_file_name: 'file4.pdf',
-        date_created: new Date(),
-      },
-      {
-        type: PaperlessTaskType.Auto,
-        task_name: PaperlessTaskName.ConsumeFile,
-        status: PaperlessTaskStatus.Complete,
-        acknowledged: false,
-        task_id: '1238',
-        task_file_name: 'file5.pdf',
-        date_created: new Date(),
-      },
-    ]
-
-    tasksService.reload()
-
+  it('calls acknowledge_tasks api endpoint on dismiss all and reloads', () => {
+    tasksService.dismissAllTasks().subscribe()
     const req = httpTestingController.expectOne(
-      `${environment.apiBaseUrl}tasks/?task_name=consume_file&acknowledged=false`
+      `${environment.apiBaseUrl}tasks/acknowledge/`
     )
-
-    req.flush(mockTasks)
-
-    expect(tasksService.allFileTasks).toHaveLength(5)
-    expect(tasksService.completedFileTasks).toHaveLength(2)
-    expect(tasksService.failedFileTasks).toHaveLength(1)
-    expect(tasksService.queuedFileTasks).toHaveLength(1)
-    expect(tasksService.startedFileTasks).toHaveLength(1)
+    expect(req.request.method).toEqual('POST')
+    expect(req.request.body).toEqual({
+      all: true,
+    })
+    req.flush([])
+    // reload is then called
+    httpTestingController
+      .expectOne(
+        (req: HttpRequest<unknown>) =>
+          req.url === `${environment.apiBaseUrl}tasks/status_counts/` &&
+          req.params.get('acknowledged') === 'false'
+      )
+      .flush({ all: 0, needs_attention: 0, in_progress: 0, completed: 0 })
   })
 
   it('supports running tasks', () => {
-    tasksService.run(PaperlessTaskName.SanityCheck).subscribe((res) => {
+    tasksService.run(PaperlessTaskType.SanityCheck).subscribe((res) => {
       expect(res).toEqual({
-        result: 'success',
+        task_id: 'abc-123',
       })
     })
     const req = httpTestingController.expectOne(
@@ -144,7 +159,37 @@ describe('TasksService', () => {
     )
     expect(req.request.method).toEqual('POST')
     req.flush({
-      result: 'success',
+      task_id: 'abc-123',
+    })
+  })
+
+  it('loads filtered task status counts', () => {
+    tasksService
+      .statusCounts({
+        acknowledged: false,
+        task_type: PaperlessTaskType.ConsumeFile,
+      })
+      .subscribe((res) => {
+        expect(res).toEqual({
+          all: 10,
+          needs_attention: 2,
+          in_progress: 3,
+          completed: 5,
+        })
+      })
+
+    const req = httpTestingController.expectOne(
+      (req: HttpRequest<unknown>) =>
+        req.url === `${environment.apiBaseUrl}tasks/status_counts/` &&
+        req.params.get('acknowledged') === 'false' &&
+        req.params.get('task_type') === PaperlessTaskType.ConsumeFile
+    )
+    expect(req.request.method).toEqual('GET')
+    req.flush({
+      all: 10,
+      needs_attention: 2,
+      in_progress: 3,
+      completed: 5,
     })
   })
 })

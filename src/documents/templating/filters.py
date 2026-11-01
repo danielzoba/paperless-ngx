@@ -14,7 +14,7 @@ def localize_date(value: date | datetime | str, format: str, locale: str) -> str
     Args:
         value (date | datetime | str): The date or datetime to format. If a datetime
             is provided, it should be timezone-aware (e.g., UTC from a Django DB object).
-            if str is provided is is parsed as date.
+            If str is provided it is parsed as date.
         format (str): The format to use. Can be one of Babel's preset formats
             ('short', 'medium', 'long', 'full') or a custom pattern string.
         locale (str): The locale code (e.g., 'en_US', 'fr_FR') to use for
@@ -44,7 +44,10 @@ def localize_date(value: date | datetime | str, format: str, locale: str) -> str
 
 def format_datetime(value: str | datetime, format: str) -> str:
     if isinstance(value, str):
-        value = parse_date(value)
+        parsed = parse_datetime(value) or parse_date(value)
+        if parsed is None:
+            raise ValueError(f"Invalid date or datetime string: {value!r}")
+        return parsed.strftime(format=format)
     return value.strftime(format=format)
 
 

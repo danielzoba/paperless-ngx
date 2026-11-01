@@ -1,12 +1,12 @@
-import { AsyncPipe } from '@angular/common'
+import { AsyncPipe, NgOptimizedImage } from '@angular/common'
 import {
   AfterViewInit,
   Component,
   EventEmitter,
-  Input,
   Output,
   ViewChild,
   inject,
+  input,
 } from '@angular/core'
 import { RouterModule } from '@angular/router'
 import {
@@ -14,14 +14,12 @@ import {
   NgbTooltipModule,
 } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
-import { delay, of } from 'rxjs'
 import {
   DEFAULT_DISPLAY_FIELDS,
   DisplayField,
   Document,
 } from 'src/app/data/document'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
-import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { CorrespondentNamePipe } from 'src/app/pipes/correspondent-name.pipe'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
@@ -47,11 +45,11 @@ import { LoadingComponentWithPermissions } from '../../loading-component/loading
     TagComponent,
     CustomFieldDisplayComponent,
     AsyncPipe,
+    NgOptimizedImage,
     UsernamePipe,
     CorrespondentNamePipe,
     DocumentTypeNamePipe,
     StoragePathNamePipe,
-    IfPermissionsDirective,
     CustomDatePipe,
     RouterModule,
     NgbTooltipModule,
@@ -65,14 +63,14 @@ export class DocumentCardLargeComponent
 {
   private documentService = inject(DocumentService)
   settingsService = inject(SettingsService)
+  readonly selected = input(false)
+  readonly priority = input(false)
+  readonly displayFields = input<string[]>(
+    DEFAULT_DISPLAY_FIELDS.map((f) => f.id)
+  )
+  readonly document = input<Document>(undefined)
 
   DisplayField = DisplayField
-
-  @Input()
-  selected = false
-
-  @Input()
-  displayFields: string[] = DEFAULT_DISPLAY_FIELDS.map((f) => f.id)
 
   @Output()
   toggleSelected = new EventEmitter()
@@ -80,9 +78,6 @@ export class DocumentCardLargeComponent
   get selectable() {
     return this.toggleSelected.observers.length > 0
   }
-
-  @Input()
-  document: Document
 
   @Output()
   dblClickDocument = new EventEmitter()
@@ -108,18 +103,15 @@ export class DocumentCardLargeComponent
   popoverHidden = true
 
   ngAfterViewInit(): void {
-    of(true)
-      .pipe(delay(50))
-      .subscribe(() => {
-        this.show = true
-      })
+    this.show.set(true)
   }
 
   get searchScoreClass() {
-    if (this.document.__search_hit__) {
-      if (this.document.__search_hit__.score > 0.7) {
+    const document = this.document()
+    if (document.__search_hit__) {
+      if (document.__search_hit__.score > 0.7) {
         return 'success'
-      } else if (this.document.__search_hit__.score > 0.3) {
+      } else if (document.__search_hit__.score > 0.3) {
         return 'warning'
       } else {
         return 'danger'
@@ -129,12 +121,10 @@ export class DocumentCardLargeComponent
 
   get searchNoteHighlights() {
     let highlights = []
-    if (
-      this.document['__search_hit__'] &&
-      this.document['__search_hit__'].note_highlights
-    ) {
+    const document = this.document()
+    if (document?.['__search_hit__']?.note_highlights) {
       // only show notes with a match
-      highlights = (this.document['__search_hit__'].note_highlights as string)
+      highlights = (document['__search_hit__'].note_highlights as string)
         .split(',')
         .filter((highlight) => highlight.includes('<span'))
     }
@@ -146,11 +136,11 @@ export class DocumentCardLargeComponent
   }
 
   getThumbUrl() {
-    return this.documentService.getThumbUrl(this.document.id)
+    return this.documentService.getThumbUrl(this.document().id)
   }
 
   getDownloadUrl() {
-    return this.documentService.getDownloadUrl(this.document.id)
+    return this.documentService.getDownloadUrl(this.document().id)
   }
 
   mouseLeaveCard() {
@@ -158,9 +148,22 @@ export class DocumentCardLargeComponent
   }
 
   get contentTrimmed() {
+    const document = this.document()
     return (
-      this.document.content.substring(0, 500) +
-      (this.document.content.length > 500 ? '...' : '')
+      document.content.substring(0, 500) +
+      (document.content.length > 500 ? '...' : '')
+    )
+  }
+
+  get hasSearchHighlights() {
+    return Boolean(this.document()?.__search_hit__?.highlights?.trim()?.length)
+  }
+
+  get shouldShowContentFallback() {
+    const document = this.document()
+    return (
+      document?.__search_hit__?.score == null ||
+      (!this.hasSearchHighlights && this.searchNoteHighlights.length === 0)
     )
   }
 

@@ -24,12 +24,28 @@ describe('TextComponent', () => {
     input = component.inputField.nativeElement
   })
 
+  it('should not offer itself to browser autofill by default', () => {
+    expect(
+      component.inputField.nativeElement.getAttribute('autocomplete')
+    ).toEqual('off')
+  })
+
   it('should support use of input field', () => {
     expect(component.value).toBeUndefined()
-    // TODO: why doesn't this work?
-    // input.value = 'foo'
-    // input.dispatchEvent(new Event('change'))
-    // fixture.detectChanges()
-    // expect(component.value).toEqual('foo')
+    input.value = 'foo'
+    input.dispatchEvent(new Event('input'))
+    fixture.detectChanges()
+    expect(component.value).toBe('foo')
+  })
+
+  it('should support suggestion', () => {
+    component.value = 'foo'
+    component.suggestion = 'foo'
+    expect(component.getSuggestion()).toBe('')
+    component.value = 'bar'
+    expect(component.getSuggestion()).toBe('foo')
+    component.applySuggestion()
+    fixture.detectChanges()
+    expect(component.value).toBe('foo')
   })
 })

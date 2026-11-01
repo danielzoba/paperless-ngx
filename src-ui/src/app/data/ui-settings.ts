@@ -1,3 +1,6 @@
+import { PdfEditorEditMode } from '../components/common/pdf-editor/pdf-editor-edit-mode'
+import { PdfZoomScale } from '../components/common/pdf-viewer/pdf-viewer.types'
+import { RemoteOCRModeConfig } from './paperless-config'
 import { User } from './user'
 
 export interface UiSettings {
@@ -16,6 +19,27 @@ export enum GlobalSearchType {
   ADVANCED = 'advanced',
   TITLE_CONTENT = 'title-content',
 }
+
+export enum SuggestionSource {
+  ML = 'ml',
+  AI = 'ai',
+  Both = 'both',
+}
+
+export enum CollapsibleSection {
+  ATTRIBUTES = 'attributes',
+}
+
+export enum HideableSidebarItemID {
+  Dashboard = 'dashboard',
+  SavedViews = 'saved_views',
+  ShareLinks = 'share_links',
+  Workflows = 'workflows',
+  Mail = 'mail',
+  Documentation = 'documentation',
+}
+
+export const HIDEABLE_SIDEBAR_ITEM_IDS = Object.values(HideableSidebarItemID)
 
 export const PAPERLESS_GREEN_HEX = '#17541f'
 
@@ -38,22 +62,25 @@ export const SETTINGS_KEYS = {
     'general-settings:document-details:pdf-viewer-zoom-setting',
   DATE_LOCALE: 'general-settings:date-display:date-locale',
   DATE_FORMAT: 'general-settings:date-display:date-format',
-  NOTIFICATIONS_CONSUMER_NEW_DOCUMENT:
-    'general-settings:notifications:consumer-new-documents',
   NOTIFICATIONS_CONSUMER_SUCCESS:
     'general-settings:notifications:consumer-success',
   NOTIFICATIONS_CONSUMER_FAILED:
     'general-settings:notifications:consumer-failed',
-  NOTIFICATIONS_CONSUMER_SUPPRESS_ON_DASHBOARD:
-    'general-settings:notifications:consumer-suppress-on-dashboard',
   NOTES_ENABLED: 'general-settings:notes-enabled',
   AUDITLOG_ENABLED: 'general-settings:auditlog-enabled',
   SLIM_SIDEBAR: 'general-settings:slim-sidebar',
+  SIDEBAR_HIDDEN_ITEMS: 'general-settings:sidebar:hidden-items',
+  ATTRIBUTES_SECTIONS_COLLAPSED:
+    'general-settings:attributes-sections-collapsed',
   UPDATE_CHECKING_ENABLED: 'general-settings:update-checking:enabled',
   UPDATE_CHECKING_BACKEND_SETTING:
     'general-settings:update-checking:backend-setting',
   SAVED_VIEWS_WARN_ON_UNSAVED_CHANGE:
     'general-settings:saved-views:warn-on-unsaved-change',
+  DASHBOARD_VIEWS_VISIBLE_IDS:
+    'general-settings:saved-views:dashboard-views-visible-ids',
+  SIDEBAR_VIEWS_VISIBLE_IDS:
+    'general-settings:saved-views:sidebar-views-visible-ids',
   DASHBOARD_VIEWS_SORT_ORDER:
     'general-settings:saved-views:dashboard-views-sort-order',
   SIDEBAR_VIEWS_SORT_ORDER:
@@ -61,6 +88,7 @@ export const SETTINGS_KEYS = {
   SIDEBAR_VIEWS_SHOW_COUNT:
     'general-settings:saved-views:sidebar-views-show-count',
   TOUR_COMPLETE: 'general-settings:tour-complete',
+  OBJECT_LIST_SIZES: 'general-settings:object-list-sizes',
   DEFAULT_PERMS_OWNER: 'general-settings:permissions:default-owner',
   DEFAULT_PERMS_VIEW_USERS: 'general-settings:permissions:default-view-users',
   DEFAULT_PERMS_VIEW_GROUPS: 'general-settings:permissions:default-view-groups',
@@ -70,12 +98,23 @@ export const SETTINGS_KEYS = {
     'general-settings:document-editing:remove-inbox-tags',
   DOCUMENT_EDITING_OVERLAY_THUMBNAIL:
     'general-settings:document-editing:overlay-thumbnail',
+  DOCUMENT_EDITING_AUTO_SUGGEST:
+    'general-settings:document-editing:auto-suggest',
+  DOCUMENT_EDITING_SUGGESTION_SOURCE:
+    'general-settings:document-editing:suggestion-source',
+  DOCUMENT_DETAILS_HIDDEN_FIELDS:
+    'general-settings:document-details:hidden-fields',
   SEARCH_DB_ONLY: 'general-settings:search:db-only',
   SEARCH_FULL_TYPE: 'general-settings:search:more-link',
+  PDF_EDITOR_DEFAULT_EDIT_MODE:
+    'general-settings:document-editing:default-edit-mode',
   EMPTY_TRASH_DELAY: 'trash_delay',
   GMAIL_OAUTH_URL: 'gmail_oauth_url',
   OUTLOOK_OAUTH_URL: 'outlook_oauth_url',
   EMAIL_ENABLED: 'email_enabled',
+  AI_ENABLED: 'ai_enabled',
+  REMOTE_OCR_CONFIGURED: 'remote_ocr:configured',
+  REMOTE_OCR_MODE: 'remote_ocr:mode',
 }
 
 export const SETTINGS: UiSetting[] = [
@@ -103,6 +142,16 @@ export const SETTINGS: UiSetting[] = [
     key: SETTINGS_KEYS.SLIM_SIDEBAR,
     type: 'boolean',
     default: false,
+  },
+  {
+    key: SETTINGS_KEYS.SIDEBAR_HIDDEN_ITEMS,
+    type: 'array',
+    default: [],
+  },
+  {
+    key: SETTINGS_KEYS.ATTRIBUTES_SECTIONS_COLLAPSED,
+    type: 'array',
+    default: [],
   },
   {
     key: SETTINGS_KEYS.DOCUMENT_LIST_SIZE,
@@ -145,22 +194,12 @@ export const SETTINGS: UiSetting[] = [
     default: 'mediumDate',
   },
   {
-    key: SETTINGS_KEYS.NOTIFICATIONS_CONSUMER_NEW_DOCUMENT,
-    type: 'boolean',
-    default: true,
-  },
-  {
     key: SETTINGS_KEYS.NOTIFICATIONS_CONSUMER_SUCCESS,
     type: 'boolean',
     default: true,
   },
   {
     key: SETTINGS_KEYS.NOTIFICATIONS_CONSUMER_FAILED,
-    type: 'boolean',
-    default: true,
-  },
-  {
-    key: SETTINGS_KEYS.NOTIFICATIONS_CONSUMER_SUPPRESS_ON_DASHBOARD,
     type: 'boolean',
     default: true,
   },
@@ -195,6 +234,18 @@ export const SETTINGS: UiSetting[] = [
     default: false,
   },
   {
+    key: SETTINGS_KEYS.OBJECT_LIST_SIZES,
+    type: 'object',
+    default: {
+      correspondents: 25,
+      document_types: 25,
+      tags: 25,
+      storage_paths: 25,
+      share_links: 25,
+      share_link_bundles: 25,
+    },
+  },
+  {
     key: SETTINGS_KEYS.DEFAULT_PERMS_OWNER,
     type: 'number',
     default: undefined,
@@ -216,6 +267,16 @@ export const SETTINGS: UiSetting[] = [
   },
   {
     key: SETTINGS_KEYS.DEFAULT_PERMS_EDIT_GROUPS,
+    type: 'array',
+    default: [],
+  },
+  {
+    key: SETTINGS_KEYS.DASHBOARD_VIEWS_VISIBLE_IDS,
+    type: 'array',
+    default: [],
+  },
+  {
+    key: SETTINGS_KEYS.SIDEBAR_VIEWS_VISIBLE_IDS,
     type: 'array',
     default: [],
   },
@@ -255,6 +316,21 @@ export const SETTINGS: UiSetting[] = [
     default: true,
   },
   {
+    key: SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST,
+    type: 'boolean',
+    default: true,
+  },
+  {
+    key: SETTINGS_KEYS.DOCUMENT_EDITING_SUGGESTION_SOURCE,
+    type: 'string',
+    default: SuggestionSource.AI,
+  },
+  {
+    key: SETTINGS_KEYS.DOCUMENT_DETAILS_HIDDEN_FIELDS,
+    type: 'array',
+    default: [],
+  },
+  {
     key: SETTINGS_KEYS.SEARCH_DB_ONLY,
     type: 'boolean',
     default: false,
@@ -287,6 +363,26 @@ export const SETTINGS: UiSetting[] = [
   {
     key: SETTINGS_KEYS.PDF_VIEWER_ZOOM_SETTING,
     type: 'string',
-    default: 'page-width', // ZoomSetting from 'document-detail.component'
+    default: PdfZoomScale.PageWidth,
+  },
+  {
+    key: SETTINGS_KEYS.AI_ENABLED,
+    type: 'boolean',
+    default: false,
+  },
+  {
+    key: SETTINGS_KEYS.PDF_EDITOR_DEFAULT_EDIT_MODE,
+    type: 'string',
+    default: PdfEditorEditMode.Create,
+  },
+  {
+    key: SETTINGS_KEYS.REMOTE_OCR_CONFIGURED,
+    type: 'boolean',
+    default: false,
+  },
+  {
+    key: SETTINGS_KEYS.REMOTE_OCR_MODE,
+    type: 'string',
+    default: RemoteOCRModeConfig.ALWAYS,
   },
 ]

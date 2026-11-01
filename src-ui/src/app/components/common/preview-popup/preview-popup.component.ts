@@ -1,7 +1,14 @@
 import { HttpClient } from '@angular/common/http'
-import { Component, inject, Input, OnDestroy, ViewChild } from '@angular/core'
+import {
+  Component,
+  inject,
+  Input,
+  OnDestroy,
+  signal,
+  ViewChild,
+} from '@angular/core'
 import { NgbPopover, NgbPopoverModule } from '@ng-bootstrap/ng-bootstrap'
-import { PdfViewerComponent, PdfViewerModule } from 'ng2-pdf-viewer'
+import { Options } from '@popperjs/core'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { first, Subject, takeUntil } from 'rxjs'
 import { Document } from 'src/app/data/document'
@@ -10,6 +17,8 @@ import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
 import { SafeUrlPipe } from 'src/app/pipes/safeurl.pipe'
 import { DocumentService } from 'src/app/services/rest/document.service'
 import { SettingsService } from 'src/app/services/settings.service'
+import { PngxPdfViewerComponent } from '../pdf-viewer/pdf-viewer.component'
+import { PdfRenderMode } from '../pdf-viewer/pdf-viewer.types'
 
 @Component({
   selector: 'pngx-preview-popup',
@@ -18,14 +27,15 @@ import { SettingsService } from 'src/app/services/settings.service'
   imports: [
     NgbPopoverModule,
     DocumentTitlePipe,
-    PdfViewerModule,
+    PngxPdfViewerComponent,
     SafeUrlPipe,
     NgxBootstrapIconsModule,
   ],
 })
 export class PreviewPopupComponent implements OnDestroy {
+  PdfRenderMode = PdfRenderMode
   private settingsService = inject(SettingsService)
-  private documentService = inject(DocumentService)
+  public readonly documentService = inject(DocumentService)
   private http = inject(HttpClient)
 
   private _document: Document
@@ -53,19 +63,22 @@ export class PreviewPopupComponent implements OnDestroy {
 
   unsubscribeNotifier: Subject<any> = new Subject()
 
-  error = false
+  readonly error = signal(false)
 
-  requiresPassword: boolean = false
+  readonly requiresPassword = signal(false)
 
-  previewText: string
+  readonly previewText = signal<string>(null)
 
   @ViewChild('popover') popover: NgbPopover
 
-  @ViewChild('pdfViewer') pdfViewer: PdfViewerComponent
+  readonly mouseOnPreview = signal(false)
 
-  mouseOnPreview: boolean = false
+  readonly popoverClass = signal('shadow popover-preview')
 
-  popoverClass: string = 'shadow popover-preview'
+  readonly popperOptions = (options: Partial<Options>): Partial<Options> => ({
+    ...options,
+    strategy: 'fixed',
+  })
 
   get renderAsObject(): boolean {
     return (this.isPdf && this.useNativePdfViewer) || !this.isPdf
@@ -97,10 +110,10 @@ export class PreviewPopupComponent implements OnDestroy {
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
         .subscribe({
           next: (res) => {
-            this.previewText = res.toString()
+            this.previewText.set(res.toString())
           },
           error: (err) => {
-            this.error = err
+            this.error.set(err)
           },
         })
     }
@@ -108,34 +121,24 @@ export class PreviewPopupComponent implements OnDestroy {
 
   onError(event: any) {
     if (event.name == 'PasswordException') {
-      this.requiresPassword = true
+      this.requiresPassword.set(true)
     } else {
-      this.error = true
-    }
-  }
-
-  onPageRendered() {
-    // Only triggered by the pngx pdf viewer
-    if (this.documentService.searchQuery) {
-      this.pdfViewer.eventBus.dispatch('find', {
-        query: this.documentService.searchQuery,
-        caseSensitive: false,
-        highlightAll: true,
-        phraseSearch: true,
-      })
+      this.error.set(true)
     }
   }
 
   mouseEnterPreview() {
-    this.mouseOnPreview = true
+    this.mouseOnPreview.set(true)
     if (!this.popover.isOpen()) {
       // we're going to open but hide to pre-load content during hover delay
       this.popover.open()
-      this.popoverClass = 'shadow popover-preview pe-none opacity-0'
+      this.popoverClass.set('shadow popover-preview pe-none opacity-0')
       setTimeout(() => {
-        if (this.mouseOnPreview) {
+        if (this.mouseOnPreview()) {
           // show popover
-          this.popoverClass = this.popoverClass.replace('pe-none opacity-0', '')
+          this.popoverClass.set(
+            this.popoverClass().replace('pe-none opacity-0', '')
+          )
         } else {
           this.popover.close(true)
         }
@@ -144,13 +147,13 @@ export class PreviewPopupComponent implements OnDestroy {
   }
 
   mouseLeavePreview() {
-    this.mouseOnPreview = false
+    this.mouseOnPreview.set(false)
   }
 
   public close(immediate: boolean = false) {
     setTimeout(
       () => {
-        if (!this.mouseOnPreview) this.popover.close()
+        if (!this.mouseOnPreview()) this.popover.close()
       },
       immediate ? 0 : 300
     )

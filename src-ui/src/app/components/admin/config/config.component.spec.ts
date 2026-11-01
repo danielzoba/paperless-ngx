@@ -8,7 +8,11 @@ import { NgbModule } from '@ng-bootstrap/ng-bootstrap'
 import { NgSelectModule } from '@ng-select/ng-select'
 import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import { of, throwError } from 'rxjs'
-import { OutputTypeConfig } from 'src/app/data/paperless-config'
+import {
+  ConfigCategory,
+  ConfigSection,
+  OutputTypeConfig,
+} from 'src/app/data/paperless-config'
 import { ConfigService } from 'src/app/services/config.service'
 import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
@@ -143,5 +147,52 @@ describe('ConfigComponent', () => {
     )
     component.uploadFile(new File([], 'test.png'), 'app_logo')
     expect(initSpy).toHaveBeenCalled()
+  })
+
+  it('should reset option to null', () => {
+    component.configForm.patchValue({ output_type: OutputTypeConfig.PDF_A })
+    expect(component.isSet('output_type')).toBeTruthy()
+    component.resetOption('output_type')
+    expect(component.configForm.get('output_type').value).toBeNull()
+    expect(component.isSet('output_type')).toBeFalsy()
+    component.configForm.patchValue({ app_title: 'Test Title' })
+    component.resetOption('app_title')
+    expect(component.configForm.get('app_title').value).toBeNull()
+    component.configForm.patchValue({ barcodes_enabled: true })
+    component.resetOption('barcodes_enabled')
+    expect(component.configForm.get('barcodes_enabled').value).toBeNull()
+  })
+
+  it('should identify externally configured options', () => {
+    component.externallyConfiguredVariables = new Set([
+      'PAPERLESS_OCR_LANGUAGE',
+    ])
+
+    expect(
+      component.isExternallyConfigured('PAPERLESS_OCR_LANGUAGE')
+    ).toBeTruthy()
+    expect(
+      component.isExternallyConfigured('PAPERLESS_OCR_OUTPUT_TYPE')
+    ).toBeFalsy()
+  })
+
+  it('should group options into sections within a category, or not', () => {
+    const sections = component.getCategorySections(ConfigCategory.OCR)
+    expect(sections).toEqual([null, ConfigSection.RemoteOCR])
+    expect(
+      component
+        .getCategoryOptions(ConfigCategory.OCR)
+        .map((option) => option.key)
+    ).toContain('output_type')
+    expect(
+      component
+        .getCategoryOptions(ConfigCategory.OCR, ConfigSection.RemoteOCR)
+        .map((option) => option.key)
+    ).toEqual([
+      'remote_ocr_engine',
+      'remote_ocr_api_key',
+      'remote_ocr_endpoint',
+      'remote_ocr_mode',
+    ])
   })
 })

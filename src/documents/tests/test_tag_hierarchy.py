@@ -1,6 +1,6 @@
 from unittest import mock
 
-from django.contrib.auth.models import User
+from rest_framework import status
 from rest_framework.test import APITestCase
 
 from documents import bulk_edit
@@ -11,17 +11,49 @@ from documents.models import WorkflowAction
 from documents.models import WorkflowTrigger
 from documents.serialisers import TagSerializer
 from documents.signals.handlers import run_workflows
+from paperless_testing.dirs import DirectoriesMixin
+from paperless_testing.factories import UserFactory
+from paperless_testing.permissions import grant_global
 
 
-class TestTagHierarchy(APITestCase):
-    def setUp(self):
-        self.user = User.objects.create_superuser(username="admin")
+class TestTagHierarchyPermissions(APITestCase):
+    def test_children_only_include_visible_tags(self) -> None:
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        grant_global(requester, "view_tag")
+        parent = Tag.objects.create(name="Visible parent", owner=requester)
+        hidden_child = Tag.objects.create(
+            name="Hidden child",
+            owner=owner,
+            tn_parent=parent,
+        )
+        self.client.force_authenticate(user=requester)
+
+        response = self.client.get("/api/tags/")
+
+        assert response.status_code == 200
+        parent_result = next(
+            tag for tag in response.data["results"] if tag["id"] == parent.pk
+        )
+        assert parent_result["children"] == []
+        assert hidden_child.pk not in response.data.get("all", [])
+
+        response = self.client.get(f"/api/tags/{parent.pk}/")
+
+        assert response.status_code == 200
+        assert response.data["children"] == []
+
+
+class TestTagHierarchy(DirectoriesMixin, APITestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.user = UserFactory(username="admin", superuser=True)
         self.client.force_authenticate(user=self.user)
 
         self.parent = Tag.objects.create(name="Parent")
         self.child = Tag.objects.create(name="Child", tn_parent=self.parent)
 
-        patcher = mock.patch("documents.bulk_edit.bulk_update_documents.delay")
+        patcher = mock.patch("documents.bulk_edit.bulk_update_documents.apply_async")
         self.async_task = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -32,7 +64,7 @@ class TestTagHierarchy(APITestCase):
             mime_type="application/pdf",
         )
 
-    def test_document_api_add_child_adds_parent(self):
+    def test_document_api_add_child_adds_parent(self) -> None:
         self.client.patch(
             f"/api/documents/{self.document.pk}/",
             {"tags": [self.child.pk]},
@@ -42,7 +74,20 @@ class TestTagHierarchy(APITestCase):
         tags = set(self.document.tags.values_list("pk", flat=True))
         assert tags == {self.parent.pk, self.child.pk}
 
-    def test_document_api_remove_parent_removes_children(self):
+    def test_document_api_add_child_keeps_parent_already_assigned(self) -> None:
+        # https://github.com/paperless-ngx/paperless-ngx/issues/13970
+        inbox = Tag.objects.create(name="Inbox", is_inbox_tag=True)
+        self.document.add_nested_tags([inbox, self.parent])
+        self.client.patch(
+            f"/api/documents/{self.document.pk}/",
+            {"tags": [self.child.pk]},
+            format="json",
+        )
+        self.document.refresh_from_db()
+        tags = set(self.document.tags.values_list("pk", flat=True))
+        assert tags == {self.parent.pk, self.child.pk}
+
+    def test_document_api_remove_parent_removes_children(self) -> None:
         self.document.add_nested_tags([self.parent, self.child])
         self.client.patch(
             f"/api/documents/{self.document.pk}/",
@@ -52,7 +97,7 @@ class TestTagHierarchy(APITestCase):
         self.document.refresh_from_db()
         assert self.document.tags.count() == 0
 
-    def test_document_api_remove_parent_removes_child(self):
+    def test_document_api_remove_parent_removes_child(self) -> None:
         self.document.add_nested_tags([self.child])
         self.client.patch(
             f"/api/documents/{self.document.pk}/",
@@ -62,7 +107,45 @@ class TestTagHierarchy(APITestCase):
         self.document.refresh_from_db()
         assert self.document.tags.count() == 0
 
-    def test_bulk_edit_respects_hierarchy(self):
+    def test_remove_inbox_tags_removes_nested_children(self) -> None:
+        inbox = Tag.objects.create(name="Inbox", is_inbox_tag=True)
+        nested = Tag.objects.create(name="Nested", tn_parent=inbox)
+        self.document.add_nested_tags([nested])
+
+        resp = self.client.patch(
+            f"/api/documents/{self.document.pk}/",
+            {"title": "new title", "remove_inbox_tags": True},
+            format="json",
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        self.document.refresh_from_db()
+        assert self.document.tags.count() == 0
+
+        # A subsequent save must not re-add the inbox tag as an ancestor
+        resp = self.client.patch(
+            f"/api/documents/{self.document.pk}/",
+            {"title": "another title", "tags": [], "remove_inbox_tags": True},
+            format="json",
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        self.document.refresh_from_db()
+        assert self.document.tags.count() == 0
+
+    def test_remove_inbox_tags_keeps_inbox_when_nested_child_added(self) -> None:
+        inbox = Tag.objects.create(name="Inbox", is_inbox_tag=True)
+        nested = Tag.objects.create(name="Nested", tn_parent=inbox)
+        self.document.add_nested_tags([inbox])
+
+        self.client.patch(
+            f"/api/documents/{self.document.pk}/",
+            {"tags": [nested.pk], "remove_inbox_tags": True},
+            format="json",
+        )
+        self.document.refresh_from_db()
+        tags = set(self.document.tags.values_list("pk", flat=True))
+        assert tags == {inbox.pk, nested.pk}
+
+    def test_bulk_edit_respects_hierarchy(self) -> None:
         bulk_edit.add_tag([self.document.pk], self.child.pk)
         self.document.refresh_from_db()
         tags = set(self.document.tags.values_list("pk", flat=True))
@@ -81,7 +164,7 @@ class TestTagHierarchy(APITestCase):
         self.document.refresh_from_db()
         assert self.document.tags.count() == 0
 
-    def test_workflow_actions(self):
+    def test_workflow_actions(self) -> None:
         workflow = Workflow.objects.create(name="wf", order=0)
         trigger = WorkflowTrigger.objects.create(
             type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_ADDED,
@@ -108,7 +191,7 @@ class TestTagHierarchy(APITestCase):
         self.document.refresh_from_db()
         assert self.document.tags.count() == 0
 
-    def test_tag_view_parent_update_adds_parent_to_docs(self):
+    def test_tag_view_parent_update_adds_parent_to_docs(self) -> None:
         orphan = Tag.objects.create(name="Orphan")
         self.document.tags.add(orphan)
 
@@ -122,7 +205,7 @@ class TestTagHierarchy(APITestCase):
         tags = set(self.document.tags.values_list("pk", flat=True))
         assert tags == {self.parent.pk, orphan.pk}
 
-    def test_child_document_count_included_when_parent_paginated(self):
+    def test_child_document_count_included_when_parent_paginated(self) -> None:
         self.document.tags.add(self.child)
 
         response = self.client.get(
@@ -140,14 +223,24 @@ class TestTagHierarchy(APITestCase):
         assert child_entry["id"] == self.child.pk
         assert child_entry["document_count"] == 1
 
-    def test_tag_serializer_populates_document_filter_context(self):
+    def test_tag_serializer_populates_document_filter_context(self) -> None:
         context = {}
 
         serializer = TagSerializer(self.parent, context=context)
         assert serializer.data  # triggers serialization
         assert "document_count_filter" in context
 
-    def test_cannot_set_parent_to_self(self):
+    def test_tag_list_can_order_by_document_count_with_children(self) -> None:
+        self.document.tags.add(self.child)
+
+        response = self.client.get(
+            "/api/tags/",
+            {"ordering": "document_count"},
+        )
+
+        assert response.status_code == 200
+
+    def test_cannot_set_parent_to_self(self) -> None:
         tag = Tag.objects.create(name="Selfie")
         resp = self.client.patch(
             f"/api/tags/{tag.pk}/",
@@ -157,7 +250,7 @@ class TestTagHierarchy(APITestCase):
         assert resp.status_code == 400
         assert "Cannot set itself as parent" in str(resp.data["parent"])
 
-    def test_cannot_set_parent_to_descendant(self):
+    def test_cannot_set_parent_to_descendant(self) -> None:
         a = Tag.objects.create(name="A")
         b = Tag.objects.create(name="B", tn_parent=a)
         c = Tag.objects.create(name="C", tn_parent=b)
@@ -171,7 +264,7 @@ class TestTagHierarchy(APITestCase):
         assert resp.status_code == 400
         assert "Cannot set parent to a descendant" in str(resp.data["parent"])
 
-    def test_max_depth_on_create(self):
+    def test_max_depth_on_create(self) -> None:
         a = Tag.objects.create(name="A1")
         b = Tag.objects.create(name="B1", tn_parent=a)
         c = Tag.objects.create(name="C1", tn_parent=b)
@@ -199,7 +292,7 @@ class TestTagHierarchy(APITestCase):
         assert "parent" in resp_fail.data
         assert "Maximum nesting depth exceeded" in str(resp_fail.data["parent"])
 
-    def test_max_depth_on_move_subtree(self):
+    def test_max_depth_on_move_subtree(self) -> None:
         a = Tag.objects.create(name="A2")
         b = Tag.objects.create(name="B2", tn_parent=a)
         c = Tag.objects.create(name="C2", tn_parent=b)
@@ -230,7 +323,7 @@ class TestTagHierarchy(APITestCase):
         x.refresh_from_db()
         assert x.parent_pk == c.id
 
-    def test_is_root_filter_returns_only_root_tags(self):
+    def test_is_root_filter_returns_only_root_tags(self) -> None:
         other_root = Tag.objects.create(name="Other parent")
 
         response = self.client.get(

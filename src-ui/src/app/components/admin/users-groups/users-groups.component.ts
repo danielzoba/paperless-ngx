@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, inject } from '@angular/core'
+import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { Subject, first, takeUntil } from 'rxjs'
@@ -43,8 +43,8 @@ export class UsersAndGroupsComponent
   permissionsService = inject(PermissionsService)
   private settings = inject(SettingsService)
 
-  users: User[]
-  groups: Group[]
+  readonly users = signal<User[]>(null)
+  readonly groups = signal<Group[]>(null)
 
   unsubscribeNotifier: Subject<any> = new Subject()
 
@@ -69,7 +69,7 @@ export class UsersAndGroupsComponent
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
         .subscribe({
           next: (r) => {
-            this.users = r.results
+            this.users.set(r.results)
           },
           error: (e) => {
             this.toastService.showError($localize`Error retrieving users`, e)
@@ -83,7 +83,7 @@ export class UsersAndGroupsComponent
         .pipe(first(), takeUntil(this.unsubscribeNotifier))
         .subscribe({
           next: (r) => {
-            this.groups = r.results
+            this.groups.set(r.results)
           },
           error: (e) => {
             this.toastService.showError($localize`Error retrieving groups`, e)
@@ -101,31 +101,32 @@ export class UsersAndGroupsComponent
       backdrop: 'static',
       size: 'xl',
     })
-    modal.componentInstance.dialogMode = user
-      ? EditDialogMode.EDIT
-      : EditDialogMode.CREATE
+    modal.componentInstance.dialogMode.set(
+      user ? EditDialogMode.EDIT : EditDialogMode.CREATE
+    )
     modal.componentInstance.object = user
     modal.componentInstance.succeeded
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe((newUser: User) => {
         if (
-          newUser.id === this.settings.currentUser.id &&
+          newUser.id === this.settings.currentUser().id &&
           (modal.componentInstance as UserEditDialogComponent).passwordIsSet
         ) {
           this.toastService.showInfo(
             $localize`Password has been changed, you will be logged out momentarily.`
           )
           setTimeout(() => {
+            const basePath = new URL(document.baseURI).pathname
             setLocationHref(
-              `${window.location.origin}/accounts/logout/?next=/accounts/login/?next=/`
+              `${window.location.origin}${basePath}accounts/logout/?next=${basePath}accounts/login/?next=${basePath}`
             )
           }, 2500)
         } else {
-          this.toastService.showInfo(
+          this.toastService.showSuccess(
             $localize`Saved user "${newUser.username}".`
           )
           this.usersService.listAll().subscribe((r) => {
-            this.users = r.results
+            this.users.set(r.results)
           })
         }
       })
@@ -146,13 +147,15 @@ export class UsersAndGroupsComponent
     modal.componentInstance.btnClass = 'btn-danger'
     modal.componentInstance.btnCaption = $localize`Proceed`
     modal.componentInstance.confirmClicked.subscribe(() => {
-      modal.componentInstance.buttonsEnabled = false
+      modal.componentInstance.buttonsEnabled.set(false)
       this.usersService.delete(user).subscribe({
         next: () => {
           modal.close()
-          this.toastService.showInfo($localize`Deleted user "${user.username}"`)
+          this.toastService.showSuccess(
+            $localize`Deleted user "${user.username}"`
+          )
           this.usersService.listAll().subscribe((r) => {
-            this.users = r.results
+            this.users.set(r.results)
           })
         },
         error: (e) => {
@@ -170,16 +173,18 @@ export class UsersAndGroupsComponent
       backdrop: 'static',
       size: 'lg',
     })
-    modal.componentInstance.dialogMode = group
-      ? EditDialogMode.EDIT
-      : EditDialogMode.CREATE
+    modal.componentInstance.dialogMode.set(
+      group ? EditDialogMode.EDIT : EditDialogMode.CREATE
+    )
     modal.componentInstance.object = group
     modal.componentInstance.succeeded
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe((newGroup) => {
-        this.toastService.showInfo($localize`Saved group "${newGroup.name}".`)
+        this.toastService.showSuccess(
+          $localize`Saved group "${newGroup.name}".`
+        )
         this.groupsService.listAll().subscribe((r) => {
-          this.groups = r.results
+          this.groups.set(r.results)
         })
       })
     modal.componentInstance.failed
@@ -199,13 +204,15 @@ export class UsersAndGroupsComponent
     modal.componentInstance.btnClass = 'btn-danger'
     modal.componentInstance.btnCaption = $localize`Proceed`
     modal.componentInstance.confirmClicked.subscribe(() => {
-      modal.componentInstance.buttonsEnabled = false
+      modal.componentInstance.buttonsEnabled.set(false)
       this.groupsService.delete(group).subscribe({
         next: () => {
           modal.close()
-          this.toastService.showInfo($localize`Deleted group "${group.name}"`)
+          this.toastService.showSuccess(
+            $localize`Deleted group "${group.name}"`
+          )
           this.groupsService.listAll().subscribe((r) => {
-            this.groups = r.results
+            this.groups.set(r.results)
           })
         },
         error: (e) => {
@@ -219,6 +226,6 @@ export class UsersAndGroupsComponent
   }
 
   getGroupName(id: number): string {
-    return this.groups?.find((g) => g.id === id)?.name ?? ''
+    return this.groups()?.find((g) => g.id === id)?.name ?? ''
   }
 }

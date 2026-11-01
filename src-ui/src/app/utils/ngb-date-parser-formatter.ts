@@ -52,15 +52,11 @@ export class LocalizedDateParserFormatter extends NgbDateParserFormatter {
       let segments = value.split(this.separatorRegExp)
 
       // always accept strict yyyy*mm*dd format even if that's not the input format since we can be certain its not yyyy*dd*mm
-      if (
-        value.length == 10 &&
-        segments.length == 3 &&
-        segments[0].length == 4
-      ) {
+      if (segments.length == 3 && segments[0].length == 4) {
         return inputFormat
           .replace('yyyy', segments[0])
-          .replace('mm', segments[1])
-          .replace('dd', segments[2])
+          .replace('mm', segments[1].padStart(2, '0'))
+          .replace('dd', segments[2].padStart(2, '0'))
       } else {
         // otherwise pad & re-join without separator
         value = segments.map((segment) => segment.padStart(2, '0')).join('')
@@ -106,15 +102,25 @@ export class LocalizedDateParserFormatter extends NgbDateParserFormatter {
     value = this.preformatDateInput(value)
     let match = this.getDateParseRegex().exec(value)
     if (match) {
+      const currentYear = new Date().getFullYear()
+      const currentCentury = currentYear - (currentYear % 100)
+
+      let year = +match.groups.year
+      if (year < 100) {
+        let fourDigitYear = currentCentury + year
+        // Mimic python-dateutil: keep result within -50/+49 years of current year
+        if (fourDigitYear > currentYear + 49) {
+          fourDigitYear -= 100
+        } else if (fourDigitYear <= currentYear - 50) {
+          fourDigitYear += 100
+        }
+        year = fourDigitYear
+      }
+
       let dateStruct = {
         day: +match.groups.day,
         month: +match.groups.month,
-        year: +match.groups.year,
-      }
-      if (dateStruct.year <= new Date().getFullYear() - 2000) {
-        dateStruct.year += 2000
-      } else if (dateStruct.year < 100) {
-        dateStruct.year += 1900
+        year,
       }
       return dateStruct
     } else {

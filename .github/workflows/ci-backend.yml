@@ -1,0 +1,241 @@
+name: Backend Tests
+on:
+  push:
+    branches-ignore:
+      - 'translations**'
+  pull_request:
+    branches-ignore:
+      - 'translations**'
+  workflow_dispatch:
+concurrency:
+  group: backend-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+env:
+  DEFAULT_UV_VERSION: "0.13.x"
+  # Match the Docker image: nltk refuses to read hardlinked data files, such as
+  # the copy bundled with llama-index when uv links packages from its cache
+  UV_LINK_MODE: copy
+permissions: {}
+jobs:
+  changes:
+    name: Detect Backend Changes
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    outputs:
+      backend_changed: ${{ steps.force.outputs.run_all == 'true' || steps.filter.outputs.backend == 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide run mode
+        id: force
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "run_all=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${EVENT_NAME}" == "push" && ( "${REF_NAME}" == "main" || "${REF_NAME}" == "dev" ) ]]; then
+            echo "run_all=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_all=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Set diff range
+        id: range
+        if: steps.force.outputs.run_all != 'true'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_CREATED: ${{ github.event.created }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            echo "base=${PR_BASE_SHA}" >> "$GITHUB_OUTPUT"
+          elif [[ "${EVENT_CREATED}" == "true" ]]; then
+            echo "base=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=${BEFORE_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "ref=${SHA}" >> "$GITHUB_OUTPUT"
+      - name: Detect changes
+        id: filter
+        if: steps.force.outputs.run_all != 'true'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          base: ${{ steps.range.outputs.base }}
+          ref: ${{ steps.range.outputs.ref }}
+          filters: |
+            backend:
+              - 'src/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'docker/compose/docker-compose.ci-test.yml'
+              - '.github/workflows/ci-backend.yml'
+  test:
+    needs: changes
+    if: needs.changes.outputs.backend_changed == 'true'
+    name: "Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+      fail-fast: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start containers
+        run: |
+          docker compose --file docker/compose/docker-compose.ci-test.yml pull --quiet
+          docker compose --file docker/compose/docker-compose.ci-test.yml up --detach
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.DEFAULT_UV_VERSION }}
+          enable-cache: true
+          python-version: ${{ steps.setup-python.outputs.python-version }}
+      - name: Install system dependencies
+        timeout-minutes: 12
+        uses: $/.github/actions/apt-install
+        with:
+          packages: unpaper tesseract-ocr ghostscript poppler-utils qpdf
+      - name: Install Python dependencies
+        env:
+          PYTHON_VERSION: ${{ steps.setup-python.outputs.python-version }}
+        run: |
+          uv sync \
+            --python "${PYTHON_VERSION}" \
+            --group testing \
+            --frozen
+      - name: List installed Python dependencies
+        run: |
+          uv pip list
+      - name: Run tests
+        env:
+          PAPERLESS_CI_TEST: 1
+          PYTHON_VERSION: ${{ steps.setup-python.outputs.python-version }}
+        run: |
+          uv run \
+            --python "${PYTHON_VERSION}" \
+            --dev \
+            --frozen \
+            pytest
+      - name: Upload test results to Codecov
+        if: always()
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          flags: backend-python-${{ matrix.python-version }}
+          files: junit.xml
+          report_type: test_results
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          flags: backend-python-${{ matrix.python-version }}
+          files: coverage.xml
+          report_type: coverage
+      - name: Stop containers
+        if: always()
+        run: |
+          docker compose --file docker/compose/docker-compose.ci-test.yml logs
+          docker compose --file docker/compose/docker-compose.ci-test.yml down
+  typing:
+    needs: changes
+    if: needs.changes.outputs.backend_changed == 'true'
+    name: Check project typing
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    env:
+      DEFAULT_PYTHON: "3.12"
+      PAPERLESS_SECRET_KEY: "ci-typing-not-a-real-secret"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "${{ env.DEFAULT_PYTHON }}"
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.DEFAULT_UV_VERSION }}
+          enable-cache: true
+          python-version: ${{ steps.setup-python.outputs.python-version }}
+      - name: Install Python dependencies
+        env:
+          PYTHON_VERSION: ${{ steps.setup-python.outputs.python-version }}
+        run: |
+          uv sync \
+            --python "${PYTHON_VERSION}" \
+            --group testing \
+            --group typing \
+            --frozen
+      - name: List installed Python dependencies
+        run: |
+          uv pip list
+      - name: Check typing (pyrefly)
+        continue-on-error: true
+        run: |
+          uv run pyrefly \
+            check \
+            src/
+      - name: Cache Mypy
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          # Keyed by OS, Python version, and dependency hashes
+          key: ${{ runner.os }}-mypy-py${{ env.DEFAULT_PYTHON }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mypy-py${{ env.DEFAULT_PYTHON }}-
+            ${{ runner.os }}-mypy-
+      - name: Check typing (mypy)
+        continue-on-error: true
+        run: |
+          uv run mypy \
+            --show-error-codes \
+            --warn-unused-configs \
+            src/ | uv run mypy-baseline filter
+  gate:
+    name: Backend CI Gate
+    needs: [changes, test, typing]
+    if: always()
+    runs-on: ubuntu-slim
+    steps:
+      - name: Check gate
+        env:
+          BACKEND_CHANGED: ${{ needs.changes.outputs.backend_changed }}
+          TEST_RESULT: ${{ needs.test.result }}
+          TYPING_RESULT: ${{ needs.typing.result }}
+        run: |
+          if [[ "${BACKEND_CHANGED}" != "true" ]]; then
+            echo "No backend-relevant changes detected."
+            exit 0
+          fi
+
+          if [[ "${TEST_RESULT}" != "success" ]]; then
+            echo "::error::Backend test job result: ${TEST_RESULT}"
+            exit 1
+          fi
+
+          if [[ "${TYPING_RESULT}" != "success" ]]; then
+            echo "::error::Backend typing job result: ${TYPING_RESULT}"
+            exit 1
+          fi
+
+          echo "Backend checks passed."

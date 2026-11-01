@@ -1,6 +1,8 @@
 import datetime
 import logging
 from datetime import timedelta
+from http import HTTPStatus
+from typing import Any
 
 from django.http import HttpResponseBadRequest
 from django.http import HttpResponseForbidden
@@ -16,14 +18,17 @@ from rest_framework import serializers
 from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter
 from rest_framework.generics import GenericAPIView
+from rest_framework.permissions import BasePermission
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.viewsets import ReadOnlyModelViewSet
 
-from documents.filters import ObjectOwnedOrGrantedPermissionsFilter
+from documents.filters import PermittedObjectsFilter
+from documents.models import PaperlessTask
 from documents.permissions import PaperlessObjectPermissions
 from documents.permissions import has_perms_owner_aware
+from documents.permissions import permitted_object_ids
 from documents.views import PassUserMixin
 from paperless.views import StandardPagination
 from paperless_mail.filters import ProcessedMailFilterSet
@@ -38,6 +43,15 @@ from paperless_mail.serialisers import MailAccountSerializer
 from paperless_mail.serialisers import MailRuleSerializer
 from paperless_mail.serialisers import ProcessedMailSerializer
 from paperless_mail.tasks import process_mail_accounts
+
+
+class DeleteProcessedMailPermissions(BasePermission):
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and request.user.has_perm("paperless_mail.delete_processedmail"),
+        )
 
 
 @extend_schema_view(
@@ -65,14 +79,14 @@ from paperless_mail.tasks import process_mail_accounts
         },
     ),
 )
-class MailAccountViewSet(ModelViewSet, PassUserMixin):
+class MailAccountViewSet(PassUserMixin, ModelViewSet[MailAccount]):
     model = MailAccount
 
     queryset = MailAccount.objects.all().order_by("pk")
     serializer_class = MailAccountSerializer
     pagination_class = StandardPagination
     permission_classes = (IsAuthenticated, PaperlessObjectPermissions)
-    filter_backends = (ObjectOwnedOrGrantedPermissionsFilter,)
+    filter_backends = (PermittedObjectsFilter,)
 
     def get_permissions(self):
         if self.action == "test":
@@ -86,27 +100,51 @@ class MailAccountViewSet(ModelViewSet, PassUserMixin):
         request.data["name"] = datetime.datetime.now().isoformat()
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        existing_account = None
+        account_id = request.data.get("id")
 
-        # account exists, use the password from there instead of *** and refresh_token / expiration
+        # testing a new connection requires add permission
+        if account_id is None and not request.user.has_perms(
+            ["paperless_mail.add_mailaccount"],
+        ):
+            return HttpResponseForbidden("Insufficient permissions")
+
+        # testing an existing account requires change permission on that account
+        if account_id is not None:
+            try:
+                existing_account = MailAccount.objects.get(pk=account_id)
+            except (TypeError, ValueError, MailAccount.DoesNotExist):
+                return HttpResponseForbidden("Insufficient permissions")
+
+            if not request.user.has_perms(
+                ["paperless_mail.change_mailaccount"],
+            ) or not has_perms_owner_aware(
+                request.user,
+                "change_mailaccount",
+                existing_account,
+            ):
+                return HttpResponseForbidden("Insufficient permissions")
+
+        # account exists, use the password from there instead of ***
         if (
             len(serializer.validated_data.get("password").replace("*", "")) == 0
-            and request.data["id"] is not None
+            and existing_account is not None
         ):
-            existing_account = MailAccount.objects.get(pk=request.data["id"])
             serializer.validated_data["password"] = existing_account.password
             serializer.validated_data["account_type"] = existing_account.account_type
             serializer.validated_data["refresh_token"] = existing_account.refresh_token
             serializer.validated_data["expiration"] = existing_account.expiration
 
         account = MailAccount(**serializer.validated_data)
-        with get_mailbox(
-            account.imap_server,
-            account.imap_port,
-            account.imap_security,
-        ) as M:
-            try:
+        try:
+            with get_mailbox(
+                account.imap_server,
+                account.imap_port,
+                account.imap_security,
+            ) as M:
                 if (
-                    account.is_token
+                    existing_account is not None
+                    and account.is_token
                     and account.expiration is not None
                     and account.expiration < timezone.now()
                 ):
@@ -116,38 +154,73 @@ class MailAccountViewSet(ModelViewSet, PassUserMixin):
                         existing_account.refresh_from_db()
                         account.password = existing_account.password
                     else:
+                        logger.error(
+                            "Mail account connectivity test failed: Unable to refresh oauth token",
+                        )
                         raise MailError("Unable to refresh oauth token")
 
                 mailbox_login(M, account)
                 return Response({"success": True})
-            except MailError as e:
-                logger.error(
-                    f"Mail account {account} test failed: {e}",
-                )
-                return HttpResponseBadRequest("Unable to connect to server")
+        except MailError:
+            logger.error(
+                "Mail account connectivity test failed",
+            )
+            return HttpResponseBadRequest("Unable to connect to server")
 
     @action(methods=["post"], detail=True)
     def process(self, request, pk=None):
         account = self.get_object()
-        process_mail_accounts.delay([account.pk])
+        process_mail_accounts.apply_async(
+            kwargs={"account_ids": [account.pk]},
+            headers={"trigger_source": PaperlessTask.TriggerSource.MANUAL},
+        )
 
         return Response({"result": "OK"})
 
 
-class ProcessedMailViewSet(ReadOnlyModelViewSet, PassUserMixin):
+@extend_schema_view(
+    bulk_delete=extend_schema(
+        operation_id="processed_mail_bulk_delete",
+        description="Delete multiple processed mail records by ID.",
+        request=inline_serializer(
+            name="BulkDeleteMailRequest",
+            fields={
+                "mail_ids": serializers.ListField(child=serializers.IntegerField()),
+            },
+        ),
+        responses={
+            (HTTPStatus.OK, "application/json"): inline_serializer(
+                name="BulkDeleteMailResponse",
+                fields={
+                    "result": serializers.CharField(),
+                    "deleted_mail_ids": serializers.ListField(
+                        child=serializers.IntegerField(),
+                    ),
+                },
+            ),
+            HTTPStatus.BAD_REQUEST: None,
+            HTTPStatus.FORBIDDEN: None,
+        },
+    ),
+)
+class ProcessedMailViewSet(PassUserMixin, ReadOnlyModelViewSet[ProcessedMail]):
     permission_classes = (IsAuthenticated, PaperlessObjectPermissions)
     serializer_class = ProcessedMailSerializer
     pagination_class = StandardPagination
     filter_backends = (
         DjangoFilterBackend,
         OrderingFilter,
-        ObjectOwnedOrGrantedPermissionsFilter,
+        PermittedObjectsFilter,
     )
     filterset_class = ProcessedMailFilterSet
 
     queryset = ProcessedMail.objects.all().order_by("-processed")
 
-    @action(methods=["post"], detail=False)
+    @action(
+        methods=["post"],
+        detail=False,
+        permission_classes=[IsAuthenticated, DeleteProcessedMailPermissions],
+    )
     def bulk_delete(self, request):
         mail_ids = request.data.get("mail_ids", [])
         if not isinstance(mail_ids, list) or not all(
@@ -155,21 +228,28 @@ class ProcessedMailViewSet(ReadOnlyModelViewSet, PassUserMixin):
         ):
             return HttpResponseBadRequest("mail_ids must be a list of integers")
         mails = ProcessedMail.objects.filter(id__in=mail_ids)
-        for mail in mails:
-            if not has_perms_owner_aware(request.user, "delete_processedmail", mail):
-                return HttpResponseForbidden("Insufficient permissions")
-            mail.delete()
+        # Check every id up front so an unpermitted one rejects the whole
+        # request rather than deleting the mails ahead of it first.
+        if mails.exclude(
+            pk__in=permitted_object_ids(
+                request.user,
+                ProcessedMail,
+                "delete_processedmail",
+            ),
+        ).exists():
+            return HttpResponseForbidden("Insufficient permissions")
+        mails.delete()
         return Response({"result": "OK", "deleted_mail_ids": mail_ids})
 
 
-class MailRuleViewSet(ModelViewSet, PassUserMixin):
+class MailRuleViewSet(PassUserMixin, ModelViewSet[MailRule]):
     model = MailRule
 
     queryset = MailRule.objects.all().order_by("order")
     serializer_class = MailRuleSerializer
     pagination_class = StandardPagination
     permission_classes = (IsAuthenticated, PaperlessObjectPermissions)
-    filter_backends = (ObjectOwnedOrGrantedPermissionsFilter,)
+    filter_backends = (PermittedObjectsFilter,)
 
 
 @extend_schema_view(
@@ -178,7 +258,7 @@ class MailRuleViewSet(ModelViewSet, PassUserMixin):
         responses={200: None},
     ),
 )
-class OauthCallbackView(GenericAPIView):
+class OauthCallbackView(GenericAPIView[Any]):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request, format=None):
@@ -196,7 +276,7 @@ class OauthCallbackView(GenericAPIView):
 
         if code is None:
             logger.error(
-                f"Invalid oauth callback request, code: {code}, scope: {scope}",
+                "Invalid oauth callback request: missing code",
             )
             return HttpResponseBadRequest("Invalid request, see logs for more detail")
 
@@ -207,7 +287,7 @@ class OauthCallbackView(GenericAPIView):
         state = request.query_params.get("state", "")
         if not oauth_manager.validate_state(state):
             logger.error(
-                f"Invalid oauth callback request received state: {state}, expected: {oauth_manager.state}",
+                "Invalid oauth callback request: state validation failed",
             )
             return HttpResponseBadRequest("Invalid request, see logs for more detail")
 
@@ -239,6 +319,14 @@ class OauthCallbackView(GenericAPIView):
 
                 result = oauth_manager.get_outlook_access_token(code)
 
+            else:
+                logger.error(
+                    f"Invalid oauth callback request: unrecognized scope {scope!r}",
+                )
+                return HttpResponseBadRequest(
+                    "Invalid request, see logs for more detail",
+                )
+
             access_token = result["access_token"]
             refresh_token = result["refresh_token"]
             expires_in = result["expires_in"]
@@ -248,13 +336,14 @@ class OauthCallbackView(GenericAPIView):
                 imap_server=imap_server,
                 refresh_token=refresh_token,
                 expiration=timezone.now() + timedelta(seconds=expires_in),
+                owner=request.user,
                 defaults=defaults,
             )
             return HttpResponseRedirect(
                 f"{oauth_manager.oauth_redirect_url}?oauth_success=1&account_id={account.pk}",
             )
-        except GetAccessTokenError as e:
-            logger.error(f"Error getting access token: {e}")
+        except GetAccessTokenError:
+            logger.error("Error getting access token from OAuth provider")
             return HttpResponseRedirect(
                 f"{oauth_manager.oauth_redirect_url}?oauth_success=0",
             )

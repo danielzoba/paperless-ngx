@@ -31,6 +31,7 @@
           "fi-FI": "src/locale/messages.fi_FI.xlf",
           "fr-FR": "src/locale/messages.fr_FR.xlf",
           "hu-HU": "src/locale/messages.hu_HU.xlf",
+          "id-ID": "src/locale/messages.id_ID.xlf",
           "it-IT": "src/locale/messages.it_IT.xlf",
           "ja-JP": "src/locale/messages.ja_JP.xlf",
           "lb-LU": "src/locale/messages.lb_LU.xlf",
@@ -55,13 +56,13 @@
       },
       "architect": {
         "build": {
-          "builder": "@angular-builders/custom-webpack:browser",
+          "builder": "@angular/build:application",
           "options": {
-            "customWebpackConfig": {
-                "path": "./extra-webpack.config.ts"
+            "outputPath": {
+              "base": "dist/paperless-ui",
+              "browser": ""
             },
-            "outputPath": "dist/paperless-ui",
-            "main": "src/main.ts",
+            "browser": "src/main.ts",
             "outputHashing": "none",
             "index": "src/index.html",
             "polyfills": [
@@ -70,14 +71,31 @@
             "tsConfig": "tsconfig.app.json",
             "localize": true,
             "assets": [
-              "src/favicon.ico",
               "src/apple-touch-icon.png",
+              "src/icon-192.png",
+              "src/icon-512.png",
+              "src/icon-512-maskable.png",
               "src/assets",
               "src/manifest.webmanifest",
               {
                 "glob": "{pdf.worker.min.mjs,pdf.min.mjs}",
                 "input": "node_modules/pdfjs-dist/legacy/build/",
                 "output": "/assets/js/"
+              },
+              {
+                "glob": "**/*",
+                "input": "node_modules/pdfjs-dist/wasm/",
+                "output": "/assets/wasm/"
+              },
+              {
+                "glob": "**/*",
+                "input": "node_modules/pdfjs-dist/iccs/",
+                "output": "/assets/iccs/"
+              },
+              {
+                "glob": "**/*",
+                "input": "node_modules/pdfjs-dist/cmaps/",
+                "output": "/assets/cmaps/"
               }
             ],
             "styles": [
@@ -85,8 +103,8 @@
             ],
             "scripts": [],
             "allowedCommonJsDependencies": [
-              "ng2-pdf-viewer",
               "file-saver",
+              "mime-names",
               "utif"
             ],
             "extractLicenses": false,
@@ -107,11 +125,13 @@
                   "with": "src/environments/environment.prod.ts"
                 }
               ],
-              "outputPath": "../src/documents/static/frontend/",
+              "outputPath": {
+                "base": "../src/documents/static/frontend/",
+                "browser": ""
+              },
               "optimization": true,
               "outputHashing": "none",
               "sourceMap": false,
-              "namedChunks": false,
               "extractLicenses": true,
               "budgets": [
                 {
@@ -126,6 +146,17 @@
                 }
               ]
             },
+            "e2e": {
+              "fileReplacements": [
+                {
+                  "replace": "src/environments/environment.ts",
+                  "with": "src/environments/environment.e2e.ts"
+                }
+              ],
+              "localize": [
+                "en-US"
+              ]
+            },
             "en-US": {
               "localize": [
                 "en-US"
@@ -135,18 +166,21 @@
           "defaultConfiguration": ""
         },
         "serve": {
-          "builder": "@angular-builders/custom-webpack:dev-server",
+          "builder": "@angular/build:dev-server",
           "options": {
             "buildTarget": "paperless-ui:build:en-US"
           },
           "configurations": {
             "production": {
               "buildTarget": "paperless-ui:build:production"
+            },
+            "e2e": {
+              "buildTarget": "paperless-ui:build:e2e"
             }
           }
         },
         "extract-i18n": {
-          "builder": "@angular-builders/custom-webpack:extract-i18n",
+          "builder": "@angular/build:extract-i18n",
           "options": {
             "buildTarget": "paperless-ui:build"
           }
@@ -155,16 +189,9 @@
           "builder": "@angular-builders/jest:run",
           "options": {
             "tsConfig": "tsconfig.spec.json",
-            "assets": [
-              "src/favicon.ico",
-              "src/apple-touch-icon.png",
-              "src/assets",
-              "src/manifest.webmanifest"
-            ],
-            "styles": [
-              "src/styles.scss"
-            ],
-            "scripts": []
+            "zoneless": true,
+            "watch": false,
+            "coverage": true
           }
         },
         "lint": {

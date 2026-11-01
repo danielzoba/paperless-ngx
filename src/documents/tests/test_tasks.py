@@ -3,8 +3,10 @@ from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from django.conf import settings
 from django.test import TestCase
+from django.test import override_settings
 from django.utils import timezone
 
 from documents import tasks
@@ -12,70 +14,57 @@ from documents.models import Correspondent
 from documents.models import Document
 from documents.models import DocumentType
 from documents.models import Tag
+from documents.models import WorkflowAction
 from documents.sanity_checker import SanityCheckFailedException
 from documents.sanity_checker import SanityCheckMessages
-from documents.tests.test_classifier import dummy_preprocess
-from documents.tests.utils import DirectoriesMixin
-from documents.tests.utils import FileSystemAssertsMixin
+from documents.tests.helpers import dummy_preprocess
+from paperless_testing.assertions import FileSystemAssertsMixin
+from paperless_testing.dirs import DirectoriesMixin
+from paperless_testing.factories import DocumentFactory
+from paperless_testing.samples import SIMPLE_DIGITAL_PDF
 
 
-class TestIndexReindex(DirectoriesMixin, TestCase):
-    def test_index_reindex(self):
-        Document.objects.create(
-            title="test",
-            content="my document",
-            checksum="wow",
-            added=timezone.now(),
-            created=timezone.now(),
-            modified=timezone.now(),
-        )
-
-        tasks.index_reindex()
-
-    def test_index_optimize(self):
-        Document.objects.create(
-            title="test",
-            content="my document",
-            checksum="wow",
-            added=timezone.now(),
-            created=timezone.now(),
-            modified=timezone.now(),
-        )
-
+@pytest.mark.django_db
+class TestIndexOptimize:
+    def test_index_optimize(self) -> None:
+        """Index optimization task must execute without error (Tantivy handles optimization automatically)."""
         tasks.index_optimize()
 
 
 class TestClassifier(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
     @mock.patch("documents.tasks.load_classifier")
-    def test_train_classifier_no_auto_matching(self, load_classifier):
+    def test_train_classifier_no_auto_matching(self, load_classifier) -> None:
         tasks.train_classifier()
         load_classifier.assert_not_called()
 
     @mock.patch("documents.tasks.load_classifier")
-    def test_train_classifier_with_auto_tag(self, load_classifier):
+    def test_train_classifier_with_auto_tag(self, load_classifier) -> None:
         load_classifier.return_value = None
         Tag.objects.create(matching_algorithm=Tag.MATCH_AUTO, name="test")
-        tasks.train_classifier()
+        with self.assertRaises(ValueError):
+            tasks.train_classifier()
         load_classifier.assert_called_once()
         self.assertIsNotFile(settings.MODEL_FILE)
 
     @mock.patch("documents.tasks.load_classifier")
-    def test_train_classifier_with_auto_type(self, load_classifier):
+    def test_train_classifier_with_auto_type(self, load_classifier) -> None:
         load_classifier.return_value = None
         DocumentType.objects.create(matching_algorithm=Tag.MATCH_AUTO, name="test")
-        tasks.train_classifier()
+        with self.assertRaises(ValueError):
+            tasks.train_classifier()
         load_classifier.assert_called_once()
         self.assertIsNotFile(settings.MODEL_FILE)
 
     @mock.patch("documents.tasks.load_classifier")
-    def test_train_classifier_with_auto_correspondent(self, load_classifier):
+    def test_train_classifier_with_auto_correspondent(self, load_classifier) -> None:
         load_classifier.return_value = None
         Correspondent.objects.create(matching_algorithm=Tag.MATCH_AUTO, name="test")
-        tasks.train_classifier()
+        with self.assertRaises(ValueError):
+            tasks.train_classifier()
         load_classifier.assert_called_once()
         self.assertIsNotFile(settings.MODEL_FILE)
 
-    def test_train_classifier(self):
+    def test_train_classifier(self) -> None:
         c = Correspondent.objects.create(matching_algorithm=Tag.MATCH_AUTO, name="test")
         doc = Document.objects.create(correspondent=c, content="test", title="test")
         self.assertIsNotFile(settings.MODEL_FILE)
@@ -102,59 +91,87 @@ class TestClassifier(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
             self.assertNotEqual(mtime2, mtime3)
 
 
-class TestSanityCheck(DirectoriesMixin, TestCase):
-    @mock.patch("documents.tasks.sanity_checker.check_sanity")
-    def test_sanity_check_success(self, m):
-        m.return_value = SanityCheckMessages()
-        self.assertEqual(tasks.sanity_check(), "No issues detected.")
-        m.assert_called_once()
+@pytest.mark.django_db
+class TestSanityCheck:
+    @pytest.fixture
+    def mock_check_sanity(self, mocker) -> mock.MagicMock:
+        return mocker.patch("documents.tasks.sanity_checker.check_sanity")
 
-    @mock.patch("documents.tasks.sanity_checker.check_sanity")
-    def test_sanity_check_error(self, m):
-        messages = SanityCheckMessages()
-        messages.error(None, "Some error")
-        m.return_value = messages
-        self.assertRaises(SanityCheckFailedException, tasks.sanity_check)
-        m.assert_called_once()
+    def test_sanity_check_success(self, mock_check_sanity: mock.MagicMock) -> None:
+        mock_check_sanity.return_value = SanityCheckMessages()
+        assert tasks.sanity_check() == "No issues detected."
+        mock_check_sanity.assert_called_once()
 
-    @mock.patch("documents.tasks.sanity_checker.check_sanity")
-    def test_sanity_check_error_no_raise(self, m):
+    def test_sanity_check_error_raises(
+        self,
+        mock_check_sanity: mock.MagicMock,
+        sample_doc: Document,
+    ) -> None:
         messages = SanityCheckMessages()
-        messages.error(None, "Some error")
-        m.return_value = messages
-        # No exception should be raised
+        messages.error(sample_doc.pk, "some error")
+        mock_check_sanity.return_value = messages
+        with pytest.raises(SanityCheckFailedException):
+            tasks.sanity_check()
+        mock_check_sanity.assert_called_once()
+
+    def test_sanity_check_error_no_raise(
+        self,
+        mock_check_sanity: mock.MagicMock,
+        sample_doc: Document,
+    ) -> None:
+        messages = SanityCheckMessages()
+        messages.error(sample_doc.pk, "some error")
+        mock_check_sanity.return_value = messages
         result = tasks.sanity_check(raise_on_error=False)
-        self.assertEqual(
-            result,
-            "Sanity check exited with errors. See log.",
-        )
-        m.assert_called_once()
+        assert "1 document(s) with errors" in result
+        assert "Check logs for details." in result
+        mock_check_sanity.assert_called_once()
 
-    @mock.patch("documents.tasks.sanity_checker.check_sanity")
-    def test_sanity_check_warning(self, m):
+    def test_sanity_check_warning_only(
+        self,
+        mock_check_sanity: mock.MagicMock,
+    ) -> None:
         messages = SanityCheckMessages()
-        messages.warning(None, "Some warning")
-        m.return_value = messages
-        self.assertEqual(
-            tasks.sanity_check(),
-            "Sanity check exited with warnings. See log.",
-        )
-        m.assert_called_once()
+        messages.warning(None, "extra file")
+        mock_check_sanity.return_value = messages
+        result = tasks.sanity_check()
+        assert result == "1 global warning(s) found."
+        mock_check_sanity.assert_called_once()
 
-    @mock.patch("documents.tasks.sanity_checker.check_sanity")
-    def test_sanity_check_info(self, m):
+    def test_sanity_check_info_only(
+        self,
+        mock_check_sanity: mock.MagicMock,
+        sample_doc: Document,
+    ) -> None:
         messages = SanityCheckMessages()
-        messages.info(None, "Some info")
-        m.return_value = messages
-        self.assertEqual(
-            tasks.sanity_check(),
-            "Sanity check exited with infos. See log.",
-        )
-        m.assert_called_once()
+        messages.info(sample_doc.pk, "some info")
+        mock_check_sanity.return_value = messages
+        result = tasks.sanity_check()
+        assert result == "1 document(s) with infos found."
+        mock_check_sanity.assert_called_once()
+
+    def test_sanity_check_errors_warnings_and_infos(
+        self,
+        mock_check_sanity: mock.MagicMock,
+        sample_doc: Document,
+    ) -> None:
+        messages = SanityCheckMessages()
+        messages.error(sample_doc.pk, "broken")
+        messages.warning(sample_doc.pk, "odd")
+        messages.info(sample_doc.pk, "fyi")
+        messages.warning(None, "extra file")
+        mock_check_sanity.return_value = messages
+        result = tasks.sanity_check(raise_on_error=False)
+        assert "1 document(s) with errors" in result
+        assert "1 document(s) with warnings" in result
+        assert "1 document(s) with infos" in result
+        assert "1 global warning(s)" in result
+        assert "Check logs for details." in result
+        mock_check_sanity.assert_called_once()
 
 
 class TestBulkUpdate(DirectoriesMixin, TestCase):
-    def test_bulk_update_documents(self):
+    def test_bulk_update_documents(self) -> None:
         doc1 = Document.objects.create(
             title="test",
             content="my document",
@@ -177,7 +194,7 @@ class TestEmptyTrashTask(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
         - Document is only deleted if it has been in trash for more than delay (default 30 days)
     """
 
-    def test_empty_trash(self):
+    def test_empty_trash(self) -> None:
         doc = Document.objects.create(
             title="test",
             content="my document",
@@ -200,8 +217,9 @@ class TestEmptyTrashTask(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
         self.assertEqual(Document.global_objects.count(), 0)
 
 
+@override_settings(ARCHIVE_FILE_GENERATION="always")
 class TestUpdateContent(DirectoriesMixin, TestCase):
-    def test_update_content_maybe_archive_file(self):
+    def test_update_content_maybe_archive_file(self) -> None:
         """
         GIVEN:
             - Existing document with archive file
@@ -212,20 +230,12 @@ class TestUpdateContent(DirectoriesMixin, TestCase):
         """
         sample1 = self.dirs.scratch_dir / "sample.pdf"
         shutil.copy(
-            Path(__file__).parent
-            / "samples"
-            / "documents"
-            / "originals"
-            / "0000001.pdf",
+            SIMPLE_DIGITAL_PDF,
             sample1,
         )
         sample1_archive = self.dirs.archive_dir / "sample_archive.pdf"
         shutil.copy(
-            Path(__file__).parent
-            / "samples"
-            / "documents"
-            / "originals"
-            / "0000001.pdf",
+            SIMPLE_DIGITAL_PDF,
             sample1_archive,
         )
         doc = Document.objects.create(
@@ -242,7 +252,7 @@ class TestUpdateContent(DirectoriesMixin, TestCase):
         self.assertNotEqual(Document.objects.get(pk=doc.pk).content, "test")
         self.assertNotEqual(Document.objects.get(pk=doc.pk).archive_checksum, "wow")
 
-    def test_update_content_maybe_archive_file_no_archive(self):
+    def test_update_content_maybe_archive_file_no_archive(self) -> None:
         """
         GIVEN:
             - Existing document without archive file
@@ -253,11 +263,7 @@ class TestUpdateContent(DirectoriesMixin, TestCase):
         """
         sample1 = self.dirs.scratch_dir / "sample.pdf"
         shutil.copy(
-            Path(__file__).parent
-            / "samples"
-            / "documents"
-            / "originals"
-            / "0000001.pdf",
+            SIMPLE_DIGITAL_PDF,
             sample1,
         )
         doc = Document.objects.create(
@@ -270,3 +276,339 @@ class TestUpdateContent(DirectoriesMixin, TestCase):
 
         tasks.update_document_content_maybe_archive_file(doc.pk)
         self.assertNotEqual(Document.objects.get(pk=doc.pk).content, "test")
+
+    def _create_root_with_version(self) -> tuple[Document, Document]:
+        sample1 = self.dirs.scratch_dir / "sample.pdf"
+        shutil.copy(SIMPLE_DIGITAL_PDF, sample1)
+        root = DocumentFactory(content="root content", mime_type="application/pdf")
+        version = DocumentFactory(
+            content="my document",
+            filename=sample1,
+            mime_type="application/pdf",
+            root_document=root,
+            version_index=1,
+        )
+        return root, version
+
+    @mock.patch("documents.tasks.clear_document_caches")
+    @mock.patch("documents.search.get_backend")
+    def test_update_content_version_clears_caches_for_root(
+        self,
+        mock_get_backend: mock.Mock,
+        mock_clear_caches: mock.Mock,
+    ) -> None:
+        """
+        GIVEN:
+            - A root document with a version
+        WHEN:
+            - Update content task is called for the version
+        THEN:
+            - The version's content is updated, not the root's
+            - The document is indexed
+            - Caches are cleared for both
+        """
+        root, version = self._create_root_with_version()
+
+        tasks.update_document_content_maybe_archive_file(version.pk)
+
+        self.assertNotEqual(
+            Document.objects.get(pk=version.pk).content,
+            "my document",
+        )
+        self.assertEqual(Document.objects.get(pk=root.pk).content, "root content")
+        mock_get_backend.return_value.add_or_update.assert_called_once()
+        mock_clear_caches.assert_has_calls(
+            [mock.call(version.pk), mock.call(root.pk)],
+        )
+
+    @override_settings(AI_ENABLED=True, LLM_EMBEDDING_BACKEND="huggingface")
+    @mock.patch("paperless_ai.indexing.llm_index_add_or_update_document")
+    @mock.patch("documents.search.get_backend")
+    def test_update_content_version_updates_llm_index(
+        self,
+        mock_get_backend: mock.Mock,
+        mock_llm_index: mock.Mock,
+    ) -> None:
+        """
+        GIVEN:
+            - A root document with a version
+            - The LLM index is enabled
+        WHEN:
+            - Update content task is called for the version
+        THEN:
+            - The LLM index is updated
+        """
+        _, version = self._create_root_with_version()
+
+        tasks.update_document_content_maybe_archive_file(version.pk)
+
+        mock_llm_index.assert_called_once()
+
+
+class TestUpdateContentRemoteOCR(DirectoriesMixin, TestCase):
+    """
+    Consumption workflows do not run on reprocess, so the remote parser is
+    used only in 'always' mode or when the caller explicitly asks for it.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+
+        patcher = mock.patch("documents.tasks.get_parser_registry")
+        self.mock_registry = patcher.start()
+        self.mock_registry.return_value.get_parser_for_file.return_value = None
+        self.addCleanup(patcher.stop)
+
+        self.doc = Document.objects.create(
+            title="test",
+            content="my document",
+            checksum="wow",
+            mime_type="application/pdf",
+        )
+
+    def _allow_remote(self, **kwargs) -> bool:
+        tasks.update_document_content_maybe_archive_file(self.doc.pk, **kwargs)
+        _, call_kwargs = self.mock_registry.return_value.get_parser_for_file.call_args
+        return call_kwargs["allow_remote"]
+
+    @override_settings(REMOTE_OCR_MODE="always")
+    def test_always_mode_allows_remote(self) -> None:
+        self.assertTrue(self._allow_remote())
+
+    @override_settings(REMOTE_OCR_MODE="workflow_only")
+    def test_workflow_only_mode_denies_remote_by_default(self) -> None:
+        self.assertFalse(self._allow_remote())
+
+    @override_settings(REMOTE_OCR_MODE="workflow_only")
+    def test_workflow_only_mode_allows_remote_when_requested(self) -> None:
+        self.assertTrue(self._allow_remote(remote_ocr=True))
+
+
+class TestAIIndex(DirectoriesMixin, TestCase):
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_EMBEDDING_BACKEND="huggingface",
+    )
+    def test_ai_index_success(self) -> None:
+        """
+        GIVEN:
+            - Document exists, AI is enabled, llm index backend is set
+        WHEN:
+            - llmindex_index task is called
+        THEN:
+            - update_llm_index is called and its result is returned
+        """
+        Document.objects.create(
+            title="test",
+            content="my document",
+            checksum="wow",
+        )
+        # lazy-loaded so mock the actual function
+        with mock.patch("paperless_ai.indexing.update_llm_index") as update_llm_index:
+            update_llm_index.return_value = "LLM index updated successfully."
+            result = tasks.llmindex_index()
+            update_llm_index.assert_called_once()
+            self.assertEqual(result, "LLM index updated successfully.")
+
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_EMBEDDING_BACKEND="huggingface",
+    )
+    def test_ai_index_failure(self) -> None:
+        """
+        GIVEN:
+            - Document exists, AI is enabled, llm index backend is set
+        WHEN:
+            - llmindex_index task is called and update_llm_index raises an exception
+        THEN:
+            - the exception propagates to the caller
+        """
+        Document.objects.create(
+            title="test",
+            content="my document",
+            checksum="wow",
+        )
+        # lazy-loaded so mock the actual function
+        with mock.patch("paperless_ai.indexing.update_llm_index") as update_llm_index:
+            update_llm_index.side_effect = Exception("LLM index update failed.")
+            with self.assertRaisesRegex(Exception, "LLM index update failed."):
+                tasks.llmindex_index()
+            update_llm_index.assert_called_once()
+
+    def test_update_document_in_llm_index(self) -> None:
+        """
+        GIVEN:
+            - Nothing
+        WHEN:
+            - update_document_in_llm_index task is called
+        THEN:
+            - llm_index_add_or_update_document is called
+        """
+        doc = Document.objects.create(
+            title="test",
+            content="my document",
+            checksum="wow",
+        )
+        with mock.patch(
+            "paperless_ai.indexing.llm_index_add_or_update_document",
+        ) as llm_index_add_or_update_document:
+            tasks.update_document_in_llm_index(doc)
+            llm_index_add_or_update_document.assert_called_once_with(doc)
+
+    def test_remove_document_from_llm_index(self) -> None:
+        """
+        GIVEN:
+            - Nothing
+        WHEN:
+            - remove_document_from_llm_index task is called
+        THEN:
+            - llm_index_remove_document is called
+        """
+        doc = Document.objects.create(
+            title="test",
+            content="my document",
+            checksum="wow",
+        )
+        with mock.patch(
+            "paperless_ai.indexing.llm_index_remove_document",
+        ) as llm_index_remove_document:
+            tasks.remove_document_from_llm_index(doc)
+            llm_index_remove_document.assert_called_once_with(doc)
+
+    @override_settings(AI_ENABLED=True, LLM_EMBEDDING_BACKEND="huggingface")
+    def test_bulk_update_does_not_enqueue_per_doc_llm_tasks(self) -> None:
+        """bulk_update_documents must not enqueue a per-document LLM task for each document.
+
+        The bulk path calls update_llm_index once at the end; per-doc tasks would
+        be redundant work amplification.
+        """
+        docs = [
+            Document.objects.create(
+                title=f"doc{i}",
+                content="content",
+                checksum=f"checksum{i}",
+            )
+            for i in range(3)
+        ]
+        with (
+            mock.patch(
+                "documents.tasks.update_document_in_llm_index",
+            ) as update_document_in_llm_index,
+            mock.patch(
+                "paperless_ai.indexing.update_llm_index",
+            ) as update_llm_index,
+        ):
+            doc_ids = [doc.pk for doc in docs]
+            tasks.bulk_update_documents(doc_ids)
+            self.assertEqual(update_document_in_llm_index.apply_async.call_count, 0)
+            update_llm_index.assert_called_once_with(
+                rebuild=False,
+                document_ids=doc_ids,
+            )
+
+
+class TestApplyAISuggestionsTask(DirectoriesMixin, TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.doc = Document.objects.create(
+            title="doc",
+            content="content",
+            checksum="apply-ai-suggestions",
+        )
+        self.action = WorkflowAction.objects.create(
+            type=WorkflowAction.WorkflowActionType.APPLY_AI_SUGGESTIONS,
+            ai_suggestion_fields=[WorkflowAction.AISuggestionField.TITLE],
+        )
+
+    def test_reindexes_without_sending_document_updated(self) -> None:
+        """
+        GIVEN:
+            - An apply AI suggestions action that changes the document
+        WHEN:
+            - The task runs
+        THEN:
+            - The search index and caches are refreshed directly, deliberately
+              not via the document_updated signal: that re-runs updated
+              workflows, which for this action means queueing another LLM
+              query for a document it just changed, forever
+        """
+        with (
+            mock.patch(
+                "documents.workflows.ai.apply_ai_suggestions_to_document",
+                return_value=["title"],
+            ),
+            mock.patch("documents.tasks.index_document") as index_document,
+            mock.patch("documents.tasks.clear_document_caches") as clear_caches,
+            mock.patch("documents.tasks.document_updated") as document_updated,
+        ):
+            tasks.apply_ai_suggestions(self.action.pk, self.doc.pk)
+
+        index_document.delay.assert_called_once_with(self.doc.pk)
+        clear_caches.assert_called_once_with(self.doc.pk)
+        document_updated.send.assert_not_called()
+
+    def test_no_changes_skips_reindex(self) -> None:
+        """
+        GIVEN:
+            - An apply AI suggestions action that changes nothing
+        WHEN:
+            - The task runs
+        THEN:
+            - No reindexing work is queued
+        """
+        with (
+            mock.patch(
+                "documents.workflows.ai.apply_ai_suggestions_to_document",
+                return_value=[],
+            ),
+            mock.patch("documents.tasks.index_document") as index_document,
+        ):
+            tasks.apply_ai_suggestions(self.action.pk, self.doc.pk)
+
+        index_document.delay.assert_not_called()
+
+    @override_settings(AI_ENABLED=True, LLM_EMBEDDING_BACKEND="huggingface")
+    def test_updates_llm_index_when_enabled(self) -> None:
+        """
+        GIVEN:
+            - An apply AI suggestions action that changes the document
+            - The LLM index is enabled
+        WHEN:
+            - The task runs
+        THEN:
+            - The document is updated in the LLM index too
+        """
+        with (
+            mock.patch(
+                "documents.workflows.ai.apply_ai_suggestions_to_document",
+                return_value=["title"],
+            ),
+            mock.patch("documents.tasks.index_document"),
+            mock.patch(
+                "documents.tasks.update_document_in_llm_index",
+            ) as update_in_llm_index,
+        ):
+            tasks.apply_ai_suggestions(self.action.pk, self.doc.pk)
+
+        update_in_llm_index.apply_async.assert_called_once()
+
+    def test_deleted_document_is_a_noop(self) -> None:
+        """
+        GIVEN:
+            - A document that was deleted between the workflow running and the
+              queued task starting
+        WHEN:
+            - The task runs
+        THEN:
+            - It logs and exits rather than raising
+        """
+        with (
+            mock.patch(
+                "documents.workflows.ai.apply_ai_suggestions_to_document",
+            ) as apply_suggestions,
+            self.assertLogs("paperless.tasks", level="WARNING") as cm,
+        ):
+            tasks.apply_ai_suggestions(self.action.pk, self.doc.pk + 1000)
+
+        apply_suggestions.assert_not_called()
+        self.assertIn("no longer exists", "".join(cm.output))

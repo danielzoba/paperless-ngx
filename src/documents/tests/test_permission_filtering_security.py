@@ -1,0 +1,1474 @@
+from __future__ import annotations
+
+from http import HTTPStatus
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+
+import pytest
+from django.contrib.auth.models import AnonymousUser
+from django.contrib.auth.models import Group
+from django.test import override_settings
+from rest_framework.test import APIClient
+
+from documents.matching import match_correspondents
+from documents.matching import match_document_types
+from documents.matching import match_storage_paths
+from documents.matching import match_tags
+from documents.models import Correspondent
+from documents.models import Document
+from documents.models import DocumentType
+from documents.models import StoragePath
+from documents.models import Tag
+from documents.permissions import get_permission_grantees
+from documents.permissions import has_perms_owner_aware
+from documents.permissions import permitted_document_ids
+from documents.permissions import permitted_object_ids
+from documents.permissions import restrict_queryset_to_visible
+from documents.serialisers import _get_viewable_duplicates
+from paperless_testing.factories import CorrespondentFactory
+from paperless_testing.factories import DocumentFactory
+from paperless_testing.factories import DocumentTypeFactory
+from paperless_testing.factories import StoragePathFactory
+from paperless_testing.factories import TagFactory
+from paperless_testing.factories import UserFactory
+from paperless_testing.permissions import grant_global
+from paperless_testing.permissions import grant_object
+
+if TYPE_CHECKING:
+    from django.contrib.auth.models import User
+
+    from paperless_testing.dirs import PaperlessDirs
+
+
+def assert_visible_document_ids(actual_ids, *, expected_visible, expected_hidden):
+    actual_ids = set(actual_ids)
+    expected_visible = set(expected_visible)
+    assert actual_ids == expected_visible, (
+        f"visible set mismatch: missing={expected_visible - actual_ids}, "
+        f"unexpected={actual_ids - expected_visible}"
+    )
+    for doc_id in expected_hidden:
+        assert doc_id not in actual_ids, (
+            f"document {doc_id} leaked but should be hidden"
+        )
+
+
+@pytest.mark.django_db
+class TestPermittedDocumentIdsSecurity:
+    def test_owner_sees_own_document(self):
+        user = UserFactory(username="alice")
+        stranger = UserFactory(username="mallory")
+        owned = DocumentFactory(owner=user)
+        strangers_doc = DocumentFactory(owner=stranger)
+
+        visible = permitted_document_ids(user)
+
+        assert_visible_document_ids(
+            visible,
+            expected_visible=[owned.pk],
+            expected_hidden=[strangers_doc.pk],
+        )
+
+    def test_unowned_document_visible_to_everyone(self):
+        user = UserFactory(username="alice")
+        unowned = DocumentFactory(owner=None)
+
+        assert_visible_document_ids(
+            permitted_document_ids(user),
+            expected_visible=[unowned.pk],
+            expected_hidden=[],
+        )
+
+    def test_explicit_user_permission_grants_visibility(self):
+        grantee = UserFactory(username="alice")
+        stranger = UserFactory(username="mallory")
+        owner = UserFactory(username="owner")
+        shared = DocumentFactory(owner=owner)
+        not_shared = DocumentFactory(owner=owner)
+        grant_object(grantee, shared, "view_document")
+
+        assert_visible_document_ids(
+            permitted_document_ids(grantee),
+            expected_visible=[shared.pk],
+            expected_hidden=[not_shared.pk],
+        )
+        assert_visible_document_ids(
+            permitted_document_ids(stranger),
+            expected_visible=[],
+            expected_hidden=[shared.pk, not_shared.pk],
+        )
+
+    def test_explicit_group_permission_grants_visibility_to_members_only(self):
+        owner = UserFactory(username="owner")
+        member = UserFactory(username="member")
+        non_member = UserFactory(username="non_member")
+        group = Group.objects.create(name="finance")
+        member.groups.add(group)
+        shared = DocumentFactory(owner=owner)
+        grant_object(group, shared, "view_document")
+
+        assert_visible_document_ids(
+            permitted_document_ids(member),
+            expected_visible=[shared.pk],
+            expected_hidden=[],
+        )
+        assert_visible_document_ids(
+            permitted_document_ids(non_member),
+            expected_visible=[],
+            expected_hidden=[shared.pk],
+        )
+
+    def test_soft_deleted_document_excluded_by_default(self):
+        owner = UserFactory(username="owner")
+        doc = DocumentFactory(owner=owner)
+        doc.delete()  # soft delete
+        doc.refresh_from_db()
+        assert doc.deleted_at is not None, (
+            "document should be soft-deleted, not hard-deleted, for this "
+            "test to actually validate the deleted_at filtering behavior"
+        )
+
+        assert_visible_document_ids(
+            permitted_document_ids(owner),
+            expected_visible=[],
+            expected_hidden=[doc.pk],
+        )
+
+    def test_superuser_sees_everything_including_no_perm_documents(self):
+        superuser = UserFactory(username="root", superuser=True)
+        owner = UserFactory(username="owner")
+        doc = DocumentFactory(owner=owner)
+
+        assert_visible_document_ids(
+            permitted_document_ids(superuser),
+            expected_visible=[doc.pk],
+            expected_hidden=[],
+        )
+
+    def test_anonymous_user_sees_only_unowned_documents(self):
+        owner = UserFactory(username="owner")
+        owned = DocumentFactory(owner=owner)
+        unowned = DocumentFactory(owner=None)
+
+        assert_visible_document_ids(
+            permitted_document_ids(AnonymousUser()),
+            expected_visible=[unowned.pk],
+            expected_hidden=[owned.pk],
+        )
+
+
+@pytest.mark.django_db
+class TestPermittedDocumentIdsIncludeDeleted:
+    def test_include_deleted_true_reveals_soft_deleted_owned_document(self):
+        owner = UserFactory(username="owner")
+        doc = DocumentFactory(owner=owner)
+        doc.delete()
+
+        assert_visible_document_ids(
+            permitted_document_ids(owner, include_deleted=True),
+            expected_visible=[doc.pk],
+            expected_hidden=[],
+        )
+
+    def test_include_deleted_true_still_respects_permission_boundary(self):
+        owner = UserFactory(username="owner")
+        stranger = UserFactory(username="mallory")
+        doc = DocumentFactory(owner=owner)
+        doc.delete()
+
+        assert_visible_document_ids(
+            permitted_document_ids(stranger, include_deleted=True),
+            expected_visible=[],
+            expected_hidden=[doc.pk],
+        )
+
+
+@pytest.mark.django_db
+class TestPermittedDocumentIdsVersions:
+    """
+    A version is authorized by its root document: the version's own owner and
+    grants never matter.
+    """
+
+    @pytest.mark.parametrize(
+        ("root_owner", "version_owner", "expected_visible"),
+        [
+            pytest.param(
+                "other",
+                "nobody",
+                False,
+                id="unowned-version-of-private-root",
+            ),
+            pytest.param("other", "user", False, id="own-version-of-private-root"),
+            pytest.param("user", "other", True, id="foreign-version-of-own-root"),
+            pytest.param("user", "nobody", True, id="unowned-version-of-own-root"),
+            pytest.param("nobody", "other", True, id="private-version-of-unowned-root"),
+        ],
+    )
+    def test_version_follows_root_owner(
+        self,
+        root_owner: str,
+        version_owner: str,
+        *,
+        expected_visible: bool,
+    ) -> None:
+        """
+        GIVEN:
+            - A root document and a version with differing owners
+        WHEN:
+            - The permitted document ids are resolved for the user
+        THEN:
+            - The version is visible exactly when its root is
+        """
+        user = UserFactory()
+        owners = {"user": user, "other": UserFactory(), "nobody": None}
+        root = DocumentFactory(owner=owners[root_owner])
+        version = DocumentFactory(root_document=root, owner=owners[version_owner])
+
+        visible = set(permitted_document_ids(user))
+
+        assert (version.pk in visible) is expected_visible
+        assert (root.pk in visible) is expected_visible
+
+    @staticmethod
+    def grantee(user: User, kind: str) -> User | Group:
+        """The user itself, or a new group the user belongs to."""
+        if kind == "user":
+            return user
+        group = Group.objects.create(name="shared")
+        user.groups.add(group)
+        return group
+
+    @pytest.mark.parametrize(
+        "grantee_kind",
+        [pytest.param("user", id="user"), pytest.param("group", id="group")],
+    )
+    def test_grant_on_root_applies_to_version(self, grantee_kind: str) -> None:
+        """
+        GIVEN:
+            - A private root document shared with a user or one of their groups
+            - A version of it owned by someone else
+        WHEN:
+            - The permitted document ids are resolved for the user
+        THEN:
+            - Both the root and the version are visible
+            - A user without the grant sees neither
+        """
+        user = UserFactory()
+        stranger = UserFactory()
+        root = DocumentFactory(owner=UserFactory())
+        version = DocumentFactory(root_document=root, owner=UserFactory())
+        grant_object(self.grantee(user, grantee_kind), root, "view_document")
+
+        assert_visible_document_ids(
+            permitted_document_ids(user),
+            expected_visible=[root.pk, version.pk],
+            expected_hidden=[],
+        )
+        assert_visible_document_ids(
+            permitted_document_ids(stranger),
+            expected_visible=[],
+            expected_hidden=[root.pk, version.pk],
+        )
+
+    @pytest.mark.parametrize(
+        "grantee_kind",
+        [pytest.param("user", id="user"), pytest.param("group", id="group")],
+    )
+    def test_grant_on_version_is_ignored(self, grantee_kind: str) -> None:
+        """
+        GIVEN:
+            - A private root document
+            - A version with an explicit grant for the user or one of their groups
+        WHEN:
+            - The permitted document ids are resolved for the user
+        THEN:
+            - Neither the root nor the version is visible
+        """
+        user = UserFactory()
+        root = DocumentFactory(owner=UserFactory())
+        version = DocumentFactory(root_document=root, owner=UserFactory())
+        grant_object(self.grantee(user, grantee_kind), version, "view_document")
+
+        assert_visible_document_ids(
+            permitted_document_ids(user),
+            expected_visible=[],
+            expected_hidden=[root.pk, version.pk],
+        )
+
+    def test_grant_on_one_root_does_not_reach_another_roots_version(self) -> None:
+        """
+        GIVEN:
+            - Two private roots, each with a version
+            - The user may view only the first root
+        WHEN:
+            - The permitted document ids are resolved for the user
+        THEN:
+            - Only the first root and its version are visible
+        """
+        user = UserFactory()
+        first = DocumentFactory(owner=UserFactory())
+        first_version = DocumentFactory(root_document=first, owner=UserFactory())
+        second = DocumentFactory(owner=UserFactory())
+        second_version = DocumentFactory(root_document=second, owner=user)
+        grant_object(user, first, "view_document")
+
+        assert_visible_document_ids(
+            permitted_document_ids(user),
+            expected_visible=[first.pk, first_version.pk],
+            expected_hidden=[second.pk, second_version.pk],
+        )
+
+    def test_user_in_several_groups(self) -> None:
+        """
+        GIVEN:
+            - A user in two groups
+            - Two private roots shared with one group each, and a third shared with nobody
+            - A version of each root
+        WHEN:
+            - The permitted document ids are resolved for the user
+        THEN:
+            - The two shared roots and their versions are visible
+            - The third root and its version are not
+        """
+        user = UserFactory()
+        groups = [Group.objects.create(name=f"group{i}") for i in range(2)]
+        user.groups.add(*groups)
+        shared = [DocumentFactory(owner=UserFactory()) for _ in groups]
+        for root, group in zip(shared, groups, strict=True):
+            grant_object(group, root, "view_document")
+        unshared = DocumentFactory(owner=UserFactory())
+        shared_versions = [
+            DocumentFactory(root_document=root, owner=UserFactory()) for root in shared
+        ]
+        unshared_version = DocumentFactory(root_document=unshared, owner=None)
+
+        assert_visible_document_ids(
+            permitted_document_ids(user),
+            expected_visible=[
+                *(root.pk for root in shared),
+                *(version.pk for version in shared_versions),
+            ],
+            expected_hidden=[unshared.pk, unshared_version.pk],
+        )
+
+    def test_permission_is_resolved_through_the_root(self) -> None:
+        """
+        GIVEN:
+            - A private root document where the user may view and change
+        WHEN:
+            - The permitted ids are resolved for view, change and delete
+        THEN:
+            - The version is visible for view and change only
+        """
+        user = UserFactory()
+        root = DocumentFactory(owner=UserFactory())
+        version = DocumentFactory(root_document=root, owner=UserFactory())
+        grant_object(user, root, "view_document", "change_document")
+
+        assert version.pk in set(permitted_document_ids(user))
+        assert version.pk in set(permitted_document_ids(user, perm="change_document"))
+        assert version.pk in set(
+            permitted_document_ids(user, perm="documents.change_document"),
+        )
+        assert version.pk not in set(
+            permitted_document_ids(user, perm="delete_document"),
+        )
+
+    def test_anonymous_sees_versions_of_unowned_roots_only(self) -> None:
+        """
+        GIVEN:
+            - A version owned by nobody under a private root
+            - A version owned by someone under an unowned root
+        WHEN:
+            - The permitted document ids are resolved for an anonymous user
+        THEN:
+            - Only the version of the unowned root is visible
+        """
+        private_root = DocumentFactory(owner=UserFactory())
+        private_version = DocumentFactory(root_document=private_root, owner=None)
+        open_root = DocumentFactory(owner=None)
+        open_version = DocumentFactory(root_document=open_root, owner=UserFactory())
+
+        assert_visible_document_ids(
+            permitted_document_ids(AnonymousUser()),
+            expected_visible=[open_root.pk, open_version.pk],
+            expected_hidden=[private_root.pk, private_version.pk],
+        )
+
+    def test_deleted_versions_follow_their_deleted_root(self) -> None:
+        """
+        GIVEN:
+            - A soft-deleted root document and its version, which deleting the
+              root soft-deletes too; the version is owned by someone else
+        WHEN:
+            - The permitted document ids are resolved with and without deleted
+              documents
+        THEN:
+            - Nothing is visible by default
+            - With deleted documents included, the version is visible to the
+              root's owner and not to the version's own owner
+        """
+        owner = UserFactory()
+        version_owner = UserFactory()
+        root = DocumentFactory(owner=owner)
+        version = DocumentFactory(root_document=root, owner=version_owner)
+        root.delete()
+
+        assert not {root.pk, version.pk} & set(permitted_document_ids(owner))
+        assert_visible_document_ids(
+            permitted_document_ids(owner, include_deleted=True),
+            expected_visible=[root.pk, version.pk],
+            expected_hidden=[],
+        )
+        assert_visible_document_ids(
+            permitted_document_ids(version_owner, include_deleted=True),
+            expected_visible=[],
+            expected_hidden=[root.pk, version.pk],
+        )
+
+    @pytest.mark.parametrize(
+        "is_superuser",
+        [
+            pytest.param(False, id="regular-user"),
+            pytest.param(True, id="superuser"),
+        ],
+    )
+    def test_inactive_user_sees_no_versions(self, *, is_superuser: bool) -> None:
+        """
+        GIVEN:
+            - An inactive user, possibly a superuser, who owns a root and its version
+        WHEN:
+            - The permitted document ids are resolved for them
+        THEN:
+            - Nothing is visible
+        """
+        user = UserFactory(is_active=False, is_superuser=is_superuser)
+        root = DocumentFactory(owner=user)
+        version = DocumentFactory(root_document=root, owner=user)
+
+        assert_visible_document_ids(
+            permitted_document_ids(user),
+            expected_visible=[],
+            expected_hidden=[root.pk, version.pk],
+        )
+
+    def test_superuser_sees_all_versions(self) -> None:
+        """
+        GIVEN:
+            - A private root owned by someone else, with a version
+        WHEN:
+            - The permitted document ids are resolved for a superuser
+        THEN:
+            - Both the root and the version are visible
+        """
+        superuser = UserFactory(superuser=True)
+        root = DocumentFactory(owner=UserFactory())
+        version = DocumentFactory(root_document=root, owner=UserFactory())
+
+        assert_visible_document_ids(
+            permitted_document_ids(superuser),
+            expected_visible=[root.pk, version.pk],
+            expected_hidden=[],
+        )
+
+
+@pytest.mark.django_db
+class TestHasPermsOwnerAwareVersions:
+    """
+    The single-object check agrees with permitted_document_ids: a version is
+    authorized by its root document.
+    """
+
+    @pytest.mark.parametrize(
+        ("root_owner", "version_owner", "expected"),
+        [
+            pytest.param(
+                "other",
+                "nobody",
+                False,
+                id="unowned-version-of-private-root",
+            ),
+            pytest.param("other", "user", False, id="own-version-of-private-root"),
+            pytest.param("user", "other", True, id="foreign-version-of-own-root"),
+            pytest.param("nobody", "other", True, id="private-version-of-unowned-root"),
+        ],
+    )
+    def test_version_follows_root_owner(
+        self,
+        root_owner: str,
+        version_owner: str,
+        *,
+        expected: bool,
+    ) -> None:
+        """
+        GIVEN:
+            - A root document and a version with differing owners
+        WHEN:
+            - The single-object check runs for the version
+        THEN:
+            - The version is allowed exactly when its root is
+        """
+        user = UserFactory()
+        owners = {"user": user, "other": UserFactory(), "nobody": None}
+        root = DocumentFactory(owner=owners[root_owner])
+        version = DocumentFactory(root_document=root, owner=owners[version_owner])
+
+        assert has_perms_owner_aware(user, "view_document", version) is expected
+        assert has_perms_owner_aware(user, "view_document", root) is expected
+
+    def test_grant_on_root_applies_and_grant_on_version_does_not(self) -> None:
+        """
+        GIVEN:
+            - A private root with a version, and a second private root with a version
+            - The user may change only the first root, and was granted the second
+              root's version directly
+        WHEN:
+            - The single-object check runs for each version
+        THEN:
+            - Only the first root's version is allowed
+        """
+        user = UserFactory()
+        shared_root = DocumentFactory(owner=UserFactory())
+        shared_version = DocumentFactory(root_document=shared_root, owner=UserFactory())
+        private_root = DocumentFactory(owner=UserFactory())
+        private_version = DocumentFactory(
+            root_document=private_root,
+            owner=UserFactory(),
+        )
+        grant_object(user, shared_root, "change_document")
+        grant_object(user, private_version, "change_document")
+
+        assert has_perms_owner_aware(user, "change_document", shared_version)
+        assert not has_perms_owner_aware(user, "change_document", private_version)
+
+    def test_other_models_use_their_own_owner(self) -> None:
+        """
+        GIVEN:
+            - A tag owned by someone else, and one owned by the user
+        WHEN:
+            - The single-object check runs for each
+        THEN:
+            - Only the user's own tag is allowed without a grant
+        """
+        user = UserFactory()
+        mine = TagFactory(owner=user)
+        theirs = TagFactory(owner=UserFactory())
+
+        assert has_perms_owner_aware(user, "view_tag", mine)
+        assert not has_perms_owner_aware(user, "view_tag", theirs)
+
+
+@pytest.mark.django_db
+class TestAiChatAllDocumentsPermissionBoundary:
+    """
+    Regression test pinning the "ask across all documents" AI chat behavior
+    (ChatStreamingView.post, no document_id) to the same owner/permission
+    boundary enforced by permitted_document_ids(). This call site was
+    migrated from get_objects_for_user_owner_aware() to
+    permitted_document_ids(); this test must stay green across that swap.
+    """
+
+    ENDPOINT = "/api/documents/chat/"
+
+    @override_settings(AI_ENABLED=True)
+    @patch("paperless_ai.chat.stream_chat_with_documents")
+    def test_chat_all_documents_excludes_unshared_document(self, mock_stream_chat):
+        mock_stream_chat.return_value = iter([b"data"])
+
+        owner = UserFactory(username="owner")
+        asker = UserFactory(username="asker")
+        grant_global(asker, "view_document")
+        shared = DocumentFactory(owner=owner)
+        not_shared = DocumentFactory(owner=owner)
+        grant_object(asker, shared, "view_document")
+
+        client = APIClient()
+        client.force_authenticate(user=asker)
+        response = client.post(
+            self.ENDPOINT,
+            data={"q": "question"},
+            format="json",
+        )
+
+        assert response.status_code == HTTPStatus.OK
+        mock_stream_chat.assert_called_once()
+        _, kwargs = mock_stream_chat.call_args
+        visible_ids = {doc.pk for doc in kwargs["documents"]}
+        assert shared.pk in visible_ids
+        assert not_shared.pk not in visible_ids
+
+
+@pytest.mark.django_db
+class TestDuplicateDocumentsPermissionBoundary:
+    def test_get_viewable_duplicates_includes_soft_deleted_but_respects_perms(self):
+        owner = UserFactory(username="owner")
+        stranger = UserFactory(username="mallory")
+        original = DocumentFactory(owner=owner, checksum="dupe-checksum")
+        dup_visible = DocumentFactory(owner=owner, checksum="dupe-checksum")
+        dup_hidden = DocumentFactory(owner=owner, checksum="dupe-checksum")
+        dup_hidden.delete()  # soft delete, should still be found (include_deleted=True)
+        grant_object(stranger, dup_visible, "view_document")
+
+        result_owner = _get_viewable_duplicates(original, owner)
+        assert {d.pk for d in result_owner} == {dup_visible.pk, dup_hidden.pk}
+
+        result_stranger = _get_viewable_duplicates(original, stranger)
+        assert {d.pk for d in result_stranger} == {dup_visible.pk}
+
+
+@pytest.mark.django_db
+class TestPermittedDocumentIdsArbitraryPermission:
+    def test_change_document_permission_is_distinct_from_view(self):
+        owner = UserFactory(username="owner")
+        viewer_only = UserFactory(username="viewer")
+        editor = UserFactory(username="editor")
+        doc = DocumentFactory(owner=owner)
+        grant_object(viewer_only, doc, "view_document")
+        grant_object(editor, doc, "change_document")
+        grant_object(editor, doc, "view_document")
+
+        assert_visible_document_ids(
+            permitted_document_ids(editor, perm="change_document"),
+            expected_visible=[doc.pk],
+            expected_hidden=[],
+        )
+        assert_visible_document_ids(
+            permitted_document_ids(viewer_only, perm="change_document"),
+            expected_visible=[],
+            expected_hidden=[doc.pk],
+        )
+
+    def test_qualified_permission_string_is_normalized_to_codename(self):
+        owner = UserFactory(username="owner")
+        editor = UserFactory(username="editor")
+        doc = DocumentFactory(owner=owner)
+        grant_object(editor, doc, "change_document")
+
+        assert_visible_document_ids(
+            permitted_document_ids(editor, perm="documents.change_document"),
+            expected_visible=[doc.pk],
+            expected_hidden=[],
+        )
+
+    def test_delete_permission_with_include_deleted_for_trash_restore(self):
+        owner = UserFactory(username="owner")
+        stranger = UserFactory(username="mallory")
+        view_only = UserFactory(username="viewer")
+        doc = DocumentFactory(owner=owner)
+        grant_object(view_only, doc, "view_document")
+        doc.delete()
+
+        assert_visible_document_ids(
+            permitted_document_ids(owner, perm="delete_document", include_deleted=True),
+            expected_visible=[doc.pk],
+            expected_hidden=[],
+        )
+        assert_visible_document_ids(
+            permitted_document_ids(
+                stranger,
+                perm="delete_document",
+                include_deleted=True,
+            ),
+            expected_visible=[],
+            expected_hidden=[doc.pk],
+        )
+        assert_visible_document_ids(
+            permitted_document_ids(
+                view_only,
+                perm="delete_document",
+                include_deleted=True,
+            ),
+            expected_visible=[],
+            expected_hidden=[doc.pk],
+        )
+
+
+@pytest.mark.django_db
+class TestEmailDocumentPermissionBoundary:
+    def test_email_action_rejects_document_without_view_permission(
+        self,
+        rest_api_client,
+    ):
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        grant_global(requester, "view_document")
+        rest_api_client.force_authenticate(user=requester)
+        hidden = DocumentFactory(owner=owner)
+
+        response = rest_api_client.post(
+            "/api/documents/email/",
+            {
+                "documents": [hidden.pk],
+                "addresses": "someone@example.com",
+                "subject": "test",
+                "message": "test",
+            },
+            format="json",
+        )
+        assert response.status_code == HTTPStatus.FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestBulkEditChangePermissionBoundary:
+    def test_bulk_edit_rejects_mixed_batch_when_any_document_lacks_change_permission(
+        self,
+        rest_api_client,
+    ):
+        # A bulk-edit request containing both a document the requester CAN
+        # change and one they CANNOT should be rejected as a whole: the
+        # permitted document must not be partially applied just because it
+        # was bundled with a forbidden one, proving the endpoint checks
+        # every document in the batch rather than only the first/last.
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        # grant the global change_document permission so the object-level
+        # check (not the global has_perm check) is what's under test
+        grant_global(requester, "change_document")
+        rest_api_client.force_authenticate(user=requester)
+        changeable = DocumentFactory(owner=owner)
+        grant_object(requester, changeable, "view_document")
+        grant_object(requester, changeable, "change_document")  # fully permitted
+        target = DocumentFactory(owner=owner)
+        grant_object(requester, target, "view_document")  # view only, NOT change
+
+        response = rest_api_client.post(
+            "/api/documents/bulk_edit/",
+            {
+                "documents": [changeable.pk, target.pk],
+                "method": "modify_tags",
+                "parameters": {"add_tags": [], "remove_tags": []},
+            },
+            format="json",
+        )
+        assert response.status_code == HTTPStatus.FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestBulkDownloadPermissionChecksRootDocument:
+    def test_download_requires_global_view_permission(
+        self,
+        rest_api_client: APIClient,
+        paperless_dirs: PaperlessDirs,
+    ) -> None:
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        root = DocumentFactory(owner=owner)
+        root.source_path.write_bytes(b"%PDF-1.4 test")
+        grant_object(requester, root, "view_document")
+        rest_api_client.force_authenticate(user=requester)
+
+        response = rest_api_client.post(
+            "/api/documents/bulk_download/",
+            {"documents": [root.pk]},
+            format="json",
+        )
+
+        assert response.status_code == HTTPStatus.FORBIDDEN
+
+    def test_permission_checked_on_root_not_on_version(
+        self,
+        rest_api_client: APIClient,
+        paperless_dirs: PaperlessDirs,
+    ) -> None:
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        grant_global(requester, "view_document")
+        rest_api_client.force_authenticate(user=requester)
+        root = DocumentFactory(owner=owner)
+        # a version of root that the requester has NOT been individually granted
+        version = DocumentFactory(owner=owner, root_document=root, version_index=1)
+        version.source_path.write_bytes(b"%PDF-1.4 test")
+        grant_object(requester, root, "view_document")  # granted on ROOT only
+
+        response = rest_api_client.post(
+            "/api/documents/bulk_download/",
+            {"documents": [version.pk]},
+            format="json",
+        )
+        assert (
+            response.status_code == HTTPStatus.OK
+        )  # visible because root is permitted
+
+        # Granted on the VERSION itself, but NOT on the root. If the endpoint
+        # ever regressed to checking "root OR version" instead of root-only,
+        # this grant would incorrectly unlock access. This is the case that
+        # actually discriminates correct (root-only) enforcement from a
+        # root-or-version bug; a user with no grant at all (the old
+        # `stranger` case) can't tell the two apart, since they're denied
+        # either way.
+        version_only_grantee = UserFactory(username="version_only_grantee")
+        grant_global(version_only_grantee, "view_document")
+        grant_object(version_only_grantee, version, "view_document")
+        rest_api_client.force_authenticate(user=version_only_grantee)
+        response = rest_api_client.post(
+            "/api/documents/bulk_download/",
+            {"documents": [version.pk]},
+            format="json",
+        )
+        assert (
+            response.status_code == HTTPStatus.FORBIDDEN
+        )  # version-only grant must not substitute for root permission
+
+
+@pytest.mark.django_db
+class TestDocumentOperationPermissionChecksRootDocument:
+    @pytest.mark.parametrize(
+        ("endpoint", "payload"),
+        [
+            pytest.param("/api/documents/merge/", {}, id="merge"),
+            pytest.param("/api/documents/rotate/", {"degrees": 90}, id="rotate"),
+        ],
+    )
+    @pytest.mark.parametrize("version_owner", ["none", "requester"])
+    def test_version_operation_acts_on_root(
+        self,
+        rest_api_client: APIClient,
+        endpoint: str,
+        payload: dict,
+        version_owner: str,
+    ) -> None:
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        grant_global(requester, "change_document")
+        grant_global(requester, "add_document")
+        rest_api_client.force_authenticate(user=requester)
+        root = DocumentFactory(owner=owner)
+        # A version whose owner went stale, e.g. created before the root changed hands
+        version = DocumentFactory(
+            owner=requester if version_owner == "requester" else None,
+            root_document=root,
+            version_index=1,
+        )
+
+        with (
+            patch("documents.views.bulk_edit.merge") as mock_merge,
+            patch("documents.views.bulk_edit.rotate") as mock_rotate,
+        ):
+            mock_merge.__name__ = "merge"
+            mock_rotate.__name__ = "rotate"
+            response = rest_api_client.post(
+                endpoint,
+                {"documents": [version.pk], **payload},
+                format="json",
+            )
+
+        assert response.status_code == HTTPStatus.FORBIDDEN
+        mock_merge.assert_not_called()
+        mock_rotate.assert_not_called()
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("_search_index")
+class TestTrashRestorePermissionBoundary:
+    def test_restore_rejects_document_without_delete_permission(
+        self,
+        rest_api_client,
+    ):
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        grant_global(requester, "delete_document")
+        rest_api_client.force_authenticate(user=requester)
+        doc = DocumentFactory(owner=owner)
+        grant_object(requester, doc, "view_document")  # view only, NOT delete
+        doc.delete()
+
+        response = rest_api_client.post(
+            "/api/trash/",
+            {"documents": [doc.pk], "action": "restore"},
+            format="json",
+        )
+        assert response.status_code == HTTPStatus.FORBIDDEN
+
+    def test_restore_allows_document_with_explicit_delete_permission(
+        self,
+        rest_api_client,
+    ):
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        grant_global(requester, "delete_document")
+        rest_api_client.force_authenticate(user=requester)
+        doc = DocumentFactory(owner=owner)
+        grant_object(requester, doc, "delete_document")
+        doc.delete()
+
+        response = rest_api_client.post(
+            "/api/trash/",
+            {"documents": [doc.pk], "action": "restore"},
+            format="json",
+        )
+        assert response.status_code == HTTPStatus.OK
+
+    def test_restore_requires_global_delete_permission(self, rest_api_client):
+        owner = UserFactory(username="owner")
+        requester = UserFactory(username="requester")
+        rest_api_client.force_authenticate(user=requester)
+        doc = DocumentFactory(owner=owner)
+        grant_object(requester, doc, "delete_document")
+        doc.delete()
+
+        response = rest_api_client.post(
+            "/api/trash/",
+            {"documents": [doc.pk], "action": "restore"},
+            format="json",
+        )
+
+        assert response.status_code == HTTPStatus.FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestTrashViewExcludesExplicitlyGrantedDocuments:
+    """
+    Regression test pinning TrashView's use of
+    ``_TrashPermittedObjectsFilter`` (``include_granted = False``). If that
+    flag were ever flipped to the default ``True``, or the subclass removed
+    in favor of the base ``PermittedObjectsFilter``, a trashed document
+    would leak into ``/api/trash/`` results for any user holding an
+    explicit guardian grant on it, even though they are neither the owner
+    nor a superuser.
+    """
+
+    def test_explicit_grant_does_not_leak_trashed_document(self, rest_api_client):
+        owner = UserFactory(username="trash_owner")
+        grantee = UserFactory(username="trash_grantee")
+        grant_global(grantee, "view_document")
+        doc = DocumentFactory(owner=owner)
+        doc.delete()  # soft delete
+        grant_object(grantee, doc, "view_document")
+
+        rest_api_client.force_authenticate(user=grantee)
+        response = rest_api_client.get("/api/trash/")
+
+        assert response.status_code == HTTPStatus.OK
+        result_ids = {result["id"] for result in response.data["results"]}
+        assert doc.pk not in result_ids
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("model", "factory", "perm"),
+    [
+        (Tag, TagFactory, "view_tag"),
+        (Correspondent, CorrespondentFactory, "view_correspondent"),
+        (DocumentType, DocumentTypeFactory, "view_documenttype"),
+        (StoragePath, StoragePathFactory, "view_storagepath"),
+    ],
+)
+class TestPermittedObjectIdsGenericModels:
+    def test_owner_sees_own_object(self, model, factory, perm):
+        owner = UserFactory(username=f"owner_{model.__name__}")
+        stranger = UserFactory(username=f"stranger_{model.__name__}")
+        owned = factory(owner=owner)
+        strangers = factory(owner=stranger)
+
+        assert_visible_document_ids(
+            permitted_object_ids(owner, model, perm),
+            expected_visible=[owned.pk],
+            expected_hidden=[strangers.pk],
+        )
+
+    @pytest.mark.parametrize("is_superuser", [False, True])
+    def test_inactive_user_sees_nothing(self, model, factory, perm, is_superuser):
+        suffix = f"{model.__name__}_{is_superuser}"
+        user = UserFactory(
+            username=f"inactive_{suffix}",
+            is_active=False,
+            is_superuser=is_superuser,
+        )
+        other = UserFactory(username=f"other_{suffix}")
+        granted = factory(owner=other)
+        grant_object(user, granted, perm)
+
+        assert_visible_document_ids(
+            permitted_object_ids(user, model, perm),
+            expected_visible=[],
+            expected_hidden=[
+                factory(owner=None).pk,
+                factory(owner=user).pk,
+                granted.pk,
+            ],
+        )
+
+    def test_unowned_object_visible_to_everyone(self, model, factory, perm):
+        user = UserFactory(username=f"user_{model.__name__}")
+        unowned = factory(owner=None)
+
+        assert_visible_document_ids(
+            permitted_object_ids(user, model, perm),
+            expected_visible=[unowned.pk],
+            expected_hidden=[],
+        )
+
+    def test_explicit_permission_grants_visibility(self, model, factory, perm):
+        owner = UserFactory(username=f"owner2_{model.__name__}")
+        grantee = UserFactory(username=f"grantee_{model.__name__}")
+        stranger = UserFactory(username=f"stranger2_{model.__name__}")
+        shared = factory(owner=owner)
+        not_shared = factory(owner=owner)
+        grant_object(grantee, shared, perm)
+
+        assert_visible_document_ids(
+            permitted_object_ids(grantee, model, perm),
+            expected_visible=[shared.pk],
+            expected_hidden=[not_shared.pk],
+        )
+        assert_visible_document_ids(
+            permitted_object_ids(stranger, model, perm),
+            expected_visible=[],
+            expected_hidden=[shared.pk, not_shared.pk],
+        )
+
+    def test_group_permission_grants_visibility_to_members_only(
+        self,
+        model,
+        factory,
+        perm,
+    ):
+        owner = UserFactory(username=f"owner3_{model.__name__}")
+        member = UserFactory(username=f"member_{model.__name__}")
+        non_member = UserFactory(username=f"nonmember_{model.__name__}")
+        group = Group.objects.create(name=f"group_{model.__name__}")
+        member.groups.add(group)
+        shared = factory(owner=owner)
+        grant_object(group, shared, perm)
+
+        assert_visible_document_ids(
+            permitted_object_ids(member, model, perm),
+            expected_visible=[shared.pk],
+            expected_hidden=[],
+        )
+        assert_visible_document_ids(
+            permitted_object_ids(non_member, model, perm),
+            expected_visible=[],
+            expected_hidden=[shared.pk],
+        )
+
+    def test_superuser_sees_everything(self, model, factory, perm):
+        superuser = UserFactory(username=f"root_{model.__name__}", superuser=True)
+        owner = UserFactory(username=f"owner4_{model.__name__}")
+        obj = factory(owner=owner)
+
+        assert_visible_document_ids(
+            permitted_object_ids(superuser, model, perm),
+            expected_visible=[obj.pk],
+            expected_hidden=[],
+        )
+
+
+@pytest.mark.django_db
+class TestMatchingRespectsObjectPermissions:
+    def test_match_tags_only_considers_tags_visible_to_user(self):
+        owner = UserFactory(username="tag_owner")
+        classifying_user = UserFactory(username="classifier_user")
+        visible_tag = TagFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=Tag.MATCH_LITERAL,
+        )
+        hidden_tag = TagFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=Tag.MATCH_LITERAL,
+        )
+        grant_object(classifying_user, visible_tag, "view_tag")
+        doc = DocumentFactory(owner=classifying_user, content="an invoice document")
+
+        matched = match_tags(doc, classifier=None, user=classifying_user)
+        matched_ids = {t.pk for t in matched}
+        assert visible_tag.pk in matched_ids
+        assert hidden_tag.pk not in matched_ids
+
+    def test_match_correspondents_only_considers_correspondents_visible_to_user(self):
+        owner = UserFactory(username="correspondent_owner")
+        classifying_user = UserFactory(username="classifier_user2")
+        visible_correspondent = CorrespondentFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=Correspondent.MATCH_LITERAL,
+        )
+        hidden_correspondent = CorrespondentFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=Correspondent.MATCH_LITERAL,
+        )
+        grant_object(classifying_user, visible_correspondent, "view_correspondent")
+        doc = DocumentFactory(owner=classifying_user, content="an invoice document")
+
+        matched = match_correspondents(doc, classifier=None, user=classifying_user)
+        matched_ids = {c.pk for c in matched}
+        assert visible_correspondent.pk in matched_ids
+        assert hidden_correspondent.pk not in matched_ids
+
+    def test_match_document_types_only_considers_document_types_visible_to_user(self):
+        owner = UserFactory(username="document_type_owner")
+        classifying_user = UserFactory(username="classifier_user3")
+        visible_document_type = DocumentTypeFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=DocumentType.MATCH_LITERAL,
+        )
+        hidden_document_type = DocumentTypeFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=DocumentType.MATCH_LITERAL,
+        )
+        grant_object(classifying_user, visible_document_type, "view_documenttype")
+        doc = DocumentFactory(owner=classifying_user, content="an invoice document")
+
+        matched = match_document_types(doc, classifier=None, user=classifying_user)
+        matched_ids = {dt.pk for dt in matched}
+        assert visible_document_type.pk in matched_ids
+        assert hidden_document_type.pk not in matched_ids
+
+    def test_match_storage_paths_only_considers_storage_paths_visible_to_user(self):
+        owner = UserFactory(username="storage_path_owner")
+        classifying_user = UserFactory(username="classifier_user4")
+        visible_storage_path = StoragePathFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=StoragePath.MATCH_LITERAL,
+        )
+        hidden_storage_path = StoragePathFactory(
+            owner=owner,
+            match="invoice",
+            matching_algorithm=StoragePath.MATCH_LITERAL,
+        )
+        grant_object(classifying_user, visible_storage_path, "view_storagepath")
+        doc = DocumentFactory(owner=classifying_user, content="an invoice document")
+
+        matched = match_storage_paths(doc, classifier=None, user=classifying_user)
+        matched_ids = {sp.pk for sp in matched}
+        assert visible_storage_path.pk in matched_ids
+        assert hidden_storage_path.pk not in matched_ids
+
+
+@pytest.mark.django_db
+class TestBulkEditObjectsApplyToAllPermissionBoundary:
+    def test_apply_to_all_tags_excludes_unpermitted_tag(self, rest_api_client):
+        owner = UserFactory(username="tags_owner")
+        requester = UserFactory(username="tags_requester")
+        new_owner = UserFactory(username="tags_new_owner")
+        # grant the global change_tag permission so the object-level
+        # filtering (not the global has_perm check) is what's under test
+        grant_global(requester, "change_tag")
+        rest_api_client.force_authenticate(user=requester)
+        visible = TagFactory(owner=requester)
+        hidden = TagFactory(owner=owner)
+
+        response = rest_api_client.post(
+            "/api/bulk_edit_objects/",
+            {
+                "object_type": "tags",
+                "operation": "set_permissions",
+                "all": True,
+                "filters": {},
+                "owner": new_owner.pk,
+            },
+            format="json",
+        )
+        assert response.status_code == HTTPStatus.OK
+
+        # The apply_to_all dispatch must resolve permitted objects up front:
+        # the requester's own tag gets its owner reassigned, while the tag
+        # owned by someone else is excluded entirely and keeps its owner.
+        visible.refresh_from_db()
+        hidden.refresh_from_db()
+        assert visible.owner == new_owner
+        assert hidden.owner == owner
+
+    def test_apply_to_all_tags_refuses_shared_but_unowned_tag(self, rest_api_client):
+        """
+        A tag owned by someone else but shared with the requester is inside the
+        permitted set, so it reaches the ownership gate and fails the whole
+        request rather than being silently skipped. Editing permissions is
+        limited to the owner, same as documents.
+        """
+        owner = UserFactory(username="shared_tags_owner")
+        requester = UserFactory(username="shared_tags_requester")
+        grant_global(requester, "change_tag")
+        rest_api_client.force_authenticate(user=requester)
+        owned = TagFactory(owner=requester)
+        shared = TagFactory(owner=owner)
+        grant_object(requester, shared, "view_tag")
+        grant_object(requester, shared, "change_tag")
+
+        response = rest_api_client.post(
+            "/api/bulk_edit_objects/",
+            {
+                "object_type": "tags",
+                "operation": "set_permissions",
+                "all": True,
+                "filters": {},
+                "owner": requester.pk,
+            },
+            format="json",
+        )
+        assert response.status_code == HTTPStatus.FORBIDDEN
+
+        owned.refresh_from_db()
+        shared.refresh_from_db()
+        assert shared.owner == owner
+        assert owned.owner == requester
+
+
+@pytest.mark.django_db
+class TestBulkEditObjectsTagDescendantPartialPermission:
+    def test_apply_to_all_descendant_expansion_respects_per_object_permissions(
+        self,
+        rest_api_client,
+    ):
+        """
+        GIVEN:
+            - A tag hierarchy (parent -> permitted_child, unpermitted_child)
+            - A non-superuser requester who owns the parent and only ONE of
+              the two children
+        WHEN:
+            - bulk_edit_objects is called with all=True and a filter that
+              matches only the root (parent) tag, engaging the
+              tag-descendant-expansion logic in BulkEditObjectsView.post
+        THEN:
+            - The descendant expansion only pulls in descendants the
+              requester actually has permission on: the permitted child's
+              owner is reassigned alongside the parent's, while the
+              unpermitted child keeps its original owner. This pins that the
+              expansion checks per-object permissions (editable_ids), not
+              merely "is a descendant of a filter match".
+
+        NOTE: this uses ``set_permissions`` (owner reassignment) rather than
+        ``delete`` as the operation, because Tag.tn_parent (django-treenode)
+        cascades deletes to descendants at the database/ORM level regardless
+        of which tags the view resolved into ``objs`` - a delete-based test
+        would pass/fail based on FK cascade behavior, not on whether the
+        descendant-expansion logic itself respected per-object permissions.
+        """
+        owner = UserFactory(username="tag_hierarchy_owner")
+        requester = UserFactory(username="tag_hierarchy_requester")
+        new_owner = UserFactory(username="tag_hierarchy_new_owner")
+        # global change_tag permission so the has_perm() gate passes and the
+        # object-level permitted_object_ids filtering is what's under test
+        grant_global(requester, "change_tag")
+        rest_api_client.force_authenticate(user=requester)
+
+        parent = TagFactory(owner=requester, name="parent-tag")
+        permitted_child = TagFactory(
+            owner=requester,
+            name="permitted-child-tag",
+            tn_parent=parent,
+        )
+        unpermitted_child = TagFactory(
+            owner=owner,
+            name="unpermitted-child-tag",
+            tn_parent=parent,
+        )
+
+        response = rest_api_client.post(
+            "/api/bulk_edit_objects/",
+            {
+                "object_type": "tags",
+                "operation": "set_permissions",
+                "all": True,
+                "filters": {"is_root": True},
+                "owner": new_owner.pk,
+            },
+            format="json",
+        )
+        assert response.status_code == HTTPStatus.OK
+
+        parent.refresh_from_db()
+        permitted_child.refresh_from_db()
+        unpermitted_child.refresh_from_db()
+        assert parent.owner == new_owner
+        assert permitted_child.owner == new_owner
+        assert unpermitted_child.owner == owner
+
+
+@pytest.mark.django_db
+class TestRestrictQuerysetToVisible:
+    """restrict_queryset_to_visible() returns its queryset argument
+    unchanged only for "no restriction at all", so the cases that may do
+    that have to be kept narrow."""
+
+    def test_no_user_means_no_restriction(self) -> None:
+        """
+        GIVEN:
+            - No user at all (a system-triggered call)
+        WHEN:
+            - restrict_queryset_to_visible() is called
+        THEN:
+            - The queryset is returned unfiltered, rather than
+              permitted_object_ids(None, ...)'s narrower "unowned rows only"
+        """
+        owner = UserFactory(username="vis_none_owner")
+        tag = TagFactory(owner=owner)
+
+        visible = restrict_queryset_to_visible(Tag.objects.all(), None, "view_tag")
+
+        assert tag.pk in visible.values_list("pk", flat=True)
+
+    def test_active_superuser_means_no_restriction(self) -> None:
+        """
+        GIVEN:
+            - An active superuser
+        WHEN:
+            - restrict_queryset_to_visible() is called
+        THEN:
+            - The queryset is returned unfiltered, skipping the permission
+              lookup entirely
+        """
+        superuser = UserFactory(username="vis_active_super", superuser=True)
+        owner = UserFactory(username="vis_active_super_owner")
+        tag = TagFactory(owner=owner)
+
+        visible = restrict_queryset_to_visible(
+            Tag.objects.all(),
+            superuser,
+            "view_tag",
+        )
+
+        assert tag.pk in visible.values_list("pk", flat=True)
+
+    def test_inactive_superuser_is_denied_not_unrestricted(self) -> None:
+        """
+        GIVEN:
+            - A deactivated superuser
+        WHEN:
+            - restrict_queryset_to_visible() is called
+        THEN:
+            - No rows are visible, never the whole unrestricted queryset -
+              deactivation has to win over the superuser shortcut, matching
+              permitted_object_ids's own ordering
+        """
+        user = UserFactory(
+            username="vis_inactive_super",
+            is_active=False,
+            is_superuser=True,
+        )
+        TagFactory(owner=None)
+        TagFactory(owner=user)
+
+        visible = restrict_queryset_to_visible(Tag.objects.all(), user, "view_tag")
+
+        assert not visible.exists()
+
+    def test_regular_user_gets_permitted_ids(self) -> None:
+        """
+        GIVEN:
+            - An ordinary active user and a tag owned by someone else
+        WHEN:
+            - restrict_queryset_to_visible() is called
+        THEN:
+            - Only the rows permitted_object_ids() reports are visible
+        """
+        user = UserFactory(username="vis_regular")
+        other = UserFactory(username="vis_regular_other")
+        own = TagFactory(owner=user)
+        hidden = TagFactory(owner=other)
+
+        visible_ids = set(
+            restrict_queryset_to_visible(
+                Tag.objects.all(),
+                user,
+                "view_tag",
+            ).values_list("pk", flat=True),
+        )
+
+        assert own.pk in visible_ids
+        assert hidden.pk not in visible_ids
+
+
+@pytest.mark.django_db
+class TestGetPermissionGrantees:
+    def test_lists_direct_grants_per_object_and_action(self) -> None:
+        """
+        GIVEN:
+            - Two documents, the first with view and change granted to a user
+              and a group, the second with only view granted to another user
+            - A user who is a member of the granted group
+        WHEN:
+            - get_permission_grantees() is called for both documents
+        THEN:
+            - Each document and action lists exactly its direct grants
+            - The group member is not listed as a user
+        """
+        direct = UserFactory()
+        other = UserFactory()
+        member = UserFactory()
+        group = Group.objects.create(name="grantees")
+        member.groups.add(group)
+        first = DocumentFactory()
+        second = DocumentFactory()
+        grant_object(direct, first, "view_document", "change_document")
+        grant_object(group, first, "view_document", "change_document")
+        grant_object(other, second, "view_document")
+
+        grantees = get_permission_grantees(Document, [first.pk, second.pk])
+
+        assert grantees == {
+            first.pk: {
+                "view": {"users": [direct.pk], "groups": [group.pk]},
+                "change": {"users": [direct.pk], "groups": [group.pk]},
+            },
+            second.pk: {
+                "view": {"users": [other.pk], "groups": []},
+                "change": {"users": [], "groups": []},
+            },
+        }
+
+    def test_ids_are_sorted(self) -> None:
+        """
+        GIVEN:
+            - A tag with view granted to three users in reverse creation order
+        WHEN:
+            - get_permission_grantees() is called for the tag
+        THEN:
+            - The user ids come back in ascending order
+        """
+        users = [UserFactory() for _ in range(3)]
+        tag = TagFactory()
+        for user in reversed(users):
+            grant_object(user, tag, "view_tag")
+
+        grantees = get_permission_grantees(Tag, [tag.pk], actions=("view",))
+
+        assert grantees[tag.pk]["view"]["users"] == sorted(user.pk for user in users)
+
+    def test_only_requested_actions_are_returned(self) -> None:
+        """
+        GIVEN:
+            - A tag with view and change granted to a user
+        WHEN:
+            - get_permission_grantees() is called for the view action only
+        THEN:
+            - Only the view action is returned
+        """
+        user = UserFactory()
+        tag = TagFactory()
+        grant_object(user, tag, "view_tag", "change_tag")
+
+        grantees = get_permission_grantees(Tag, [tag.pk], actions=("view",))
+
+        assert grantees == {tag.pk: {"view": {"users": [user.pk], "groups": []}}}
+
+    def test_grants_on_another_model_with_the_same_pk_are_ignored(self) -> None:
+        """
+        GIVEN:
+            - A tag and a correspondent sharing a primary key, with view
+              granted to a user on the tag only
+        WHEN:
+            - get_permission_grantees() is called for the correspondent
+        THEN:
+            - No grants are returned
+        """
+        user = UserFactory()
+        tag = TagFactory()
+        correspondent = CorrespondentFactory(pk=tag.pk)
+        grant_object(user, tag, "view_tag")
+
+        grantees = get_permission_grantees(Correspondent, [correspondent.pk])
+
+        assert grantees == {
+            correspondent.pk: {
+                "view": {"users": [], "groups": []},
+                "change": {"users": [], "groups": []},
+            },
+        }

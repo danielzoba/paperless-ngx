@@ -1,6 +1,6 @@
 import { HttpEventType } from '@angular/common/http'
 import { Injectable, inject } from '@angular/core'
-import { Subscription } from 'rxjs'
+import { Subject, Subscription } from 'rxjs'
 import { DocumentService } from './rest/document.service'
 import {
   FileStatusPhase,
@@ -16,6 +16,21 @@ export class UploadDocumentsService {
 
   private uploadSubscriptions: Array<Subscription> = []
 
+  private readonly uploadsStartedSubject = new Subject<File[]>()
+
+  public uploadFiles(files: Iterable<File>) {
+    const started: File[] = []
+    for (const file of files) {
+      this.uploadFile(file)
+      started.push(file)
+    }
+    if (started.length) this.uploadsStartedSubject.next(started)
+  }
+
+  public onUploadsStarted() {
+    return this.uploadsStartedSubject.asObservable()
+  }
+
   public uploadFile(file: File) {
     let formData = new FormData()
     formData.append('document', file, file.name)
@@ -23,6 +38,7 @@ export class UploadDocumentsService {
     let status = this.websocketStatusService.newFileUpload(file.name)
 
     status.message = $localize`Connecting...`
+    this.websocketStatusService.statusChanged()
 
     this.uploadSubscriptions[file.name] = this.documentService
       .uploadDocument(formData)
@@ -35,9 +51,11 @@ export class UploadDocumentsService {
               event.total
             )
             status.message = $localize`Uploading...`
+            this.websocketStatusService.statusChanged()
           } else if (event.type == HttpEventType.Response) {
             status.taskId = event.body['task_id'] ?? event.body.toString()
             status.message = $localize`Upload complete, waiting...`
+            this.websocketStatusService.statusChanged()
             this.uploadSubscriptions[file.name]?.complete()
           }
         },

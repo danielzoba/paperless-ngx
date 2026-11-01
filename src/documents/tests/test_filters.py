@@ -4,6 +4,7 @@ from typing import Literal
 
 import pytest
 
+from documents.templating.filters import format_datetime
 from documents.templating.filters import localize_date
 
 
@@ -21,7 +22,7 @@ class TestDateLocalization:
         14,
         30,
         5,
-        tzinfo=datetime.timezone.utc,
+        tzinfo=datetime.UTC,
     )
 
     TEST_DATETIME_STRING: str = "2023-10-26T14:30:05+00:00"
@@ -83,7 +84,7 @@ class TestDateLocalization:
         format_style: str,
         locale_str: str,
         expected_output: str,
-    ):
+    ) -> None:
         """
         Tests `localize_date` with `date` objects across different locales and formats.
         """
@@ -144,7 +145,7 @@ class TestDateLocalization:
         format_style: str,
         locale_str: str,
         expected_output: str,
-    ):
+    ) -> None:
         # To handle the non-breaking space in French and other locales
         result = localize_date(value, format_style, locale_str)
         assert result.replace("\u202f", " ") == expected_output.replace("\u202f", " ")
@@ -160,14 +161,14 @@ class TestDateLocalization:
     )
     def test_localize_date_raises_type_error_for_invalid_input(
         self,
-        invalid_value: None | list[object] | dict[Any, Any] | Literal[1698330605],
-    ):
+        invalid_value: list[object] | dict[Any, Any] | Literal[1698330605] | None,
+    ) -> None:
         with pytest.raises(TypeError) as excinfo:
             localize_date(invalid_value, "medium", "en_US")
 
         assert f"Unsupported type {type(invalid_value)}" in str(excinfo.value)
 
-    def test_localize_date_raises_error_for_invalid_locale(self):
+    def test_localize_date_raises_error_for_invalid_locale(self) -> None:
         with pytest.raises(ValueError) as excinfo:
             localize_date(self.TEST_DATE, "medium", "invalid_locale_code")
 
@@ -228,7 +229,7 @@ class TestDateLocalization:
         format_style: str,
         locale_str: str,
         expected_output: str,
-    ):
+    ) -> None:
         """
         Tests `localize_date` with `date` string across different locales and formats.
         """
@@ -289,8 +290,28 @@ class TestDateLocalization:
         format_style: str,
         locale_str: str,
         expected_output: str,
-    ):
+    ) -> None:
         """
         Tests `localize_date` with `date` string across different locales and formats.
         """
         assert localize_date(value, format_style, locale_str) == expected_output
+
+
+class TestFormatDatetime:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param("2026-09-21", "2026-09-21 00:00", id="date"),
+            pytest.param(
+                "2026-09-21T13:45:00+00:00",
+                "2026-09-21 13:45",
+                id="datetime",
+            ),
+        ],
+    )
+    def test_parses_iso_strings(self, value: str, expected: str) -> None:
+        assert format_datetime(value, "%Y-%m-%d %H:%M") == expected
+
+    def test_rejects_unparseable_string(self) -> None:
+        with pytest.raises(ValueError, match="not a date"):
+            format_datetime("not a date", "%Y")

@@ -1,6 +1,10 @@
+---
+title: Home
+---
+
 <div class="grid-left" markdown>
 ![image](assets/logo_full_black.svg#only-light){.index-logo}
-![image](assets/logo_full_white.svg#only-dark){.index-logo}
+![image](assets/logo_full_eee.svg#only-dark){.index-logo}
 
 **Paperless-ngx** is a _community-supported_ open-source document management system that transforms your
 physical documents into a searchable online archive so you can keep, well, _less paper_.
@@ -8,10 +12,10 @@ physical documents into a searchable online archive so you can keep, well, _less
 [Get started](setup.md){ .md-button .md-button--primary .index-callout }
 [Demo](https://demo.paperless-ngx.com){ .md-button .md-button--secondary target=\_blank }
 
-<div style="display: flex; justify-content: end; margin-top: -1.5rem;">
-  <a href="https://m.do.co/c/8d70b916d462" target="_blank">
-    <img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/PoweredByDO/DO_Powered_by_Badge_white.svg#only-dark" class="no-lightbox" width="150px">
-    <img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/PoweredByDO/DO_Powered_by_Badge_black.svg#only-light" class="no-lightbox" width="150px">
+<div class="demo-sponsor">
+  <span>Demo hosting by</span>
+  <a href="https://fyrastack.com" target="_blank" rel="noopener">
+    <img src="assets/sponsors/fyra-stack.svg" alt="" class="no-lightbox" width="20" height="20"> Fyra Stack
   </a>
 </div>
 
@@ -24,34 +28,37 @@ physical documents into a searchable online archive so you can keep, well, _less
 
 ## Features
 
--   **Organize and index** your scanned documents with tags, correspondents, types, and more.
--   _Your_ data is stored locally on _your_ server and is never transmitted or shared in any way.
--   Performs **OCR** on your documents, adding searchable and selectable text, even to documents scanned with only images.
--   Utilizes the open-source Tesseract engine to recognize more than 100 languages.
--   Documents are saved as PDF/A format which is designed for long term storage, alongside the unaltered originals.
--   Uses machine-learning to automatically add tags, correspondents and document types to your documents.
--   Supports PDF documents, images, plain text files, Office documents (Word, Excel, PowerPoint, and LibreOffice equivalents)[^1] and more.
--   Paperless stores your documents plain on disk. Filenames and folders are managed by paperless and their format can be configured freely with different configurations assigned to different documents.
--   **Beautiful, modern web application** that features:
-    -   Customizable dashboard with statistics.
-    -   Filtering by tags, correspondents, types, and more.
-    -   Bulk editing of tags, correspondents, types and more.
-    -   Drag-and-drop uploading of documents throughout the app.
-    -   Customizable views can be saved and displayed on the dashboard and / or sidebar.
-    -   Support for custom fields of various data types.
-    -   Shareable public links with optional expiration.
--   **Full text search** helps you find what you need:
-    -   Auto completion suggests relevant words from your documents.
-    -   Results are sorted by relevance to your search query.
-    -   Highlighting shows you which parts of the document matched the query.
-    -   Searching for similar documents ("More like this")
--   **Email processing**[^1]: import documents from your email accounts:
-    -   Configure multiple accounts and rules for each account.
-    -   After processing, paperless can perform actions on the messages such as marking as read, deleting and more.
--   A built-in robust **multi-user permissions** system that supports 'global' permissions as well as per document or object.
--   A powerful workflow system that gives you even more control.
--   **Optimized** for multi core systems: Paperless-ngx consumes multiple documents in parallel.
--   The integrated sanity checker makes sure that your document archive is in good health.
+- **Organize and index** your scanned documents with tags, correspondents, types, and more.
+- _Your_ data is stored locally on _your_ server and is never transmitted or shared in any way, unless you explicitly choose to do so.
+- Performs **OCR** on your documents, adding searchable and selectable text, even to documents scanned with only images.
+  - Utilizes the open-source Tesseract engine to recognize more than 100 languages.
+  - _New!_ Supports remote OCR with Azure AI (opt-in).
+- Documents are saved as PDF/A format which is designed for long term storage, alongside the unaltered originals.
+- Uses machine-learning to automatically add tags, correspondents and document types to your documents.
+- **New**: Paperless-ngx can optionally leverage AI (Large Language Models or LLMs) for document suggestions, chatting with your documents, and similar-document retrieval. These features are opt-in and disabled by default.
+- Supports PDF documents, images, plain text files, Office documents (Word, Excel, PowerPoint, and LibreOffice equivalents)[^1] and more.
+- Paperless stores your documents plain on disk. Filenames and folders are managed by paperless and their format can be configured freely with different configurations assigned to different documents.
+- Keep multiple **versions** of a document's file under a single entry, sharing one set of metadata.
+- **Beautiful, modern web application** that features:
+  - Customizable dashboard with statistics.
+  - Filtering by tags, correspondents, types, and more.
+  - Bulk editing of tags, correspondents, types and more.
+  - Drag-and-drop uploading of documents throughout the app.
+  - Customizable views can be saved and displayed on the dashboard and / or sidebar.
+  - Support for custom fields of various data types.
+  - Shareable public links with optional expiration.
+- **Full text search** helps you find what you need:
+  - Auto completion suggests relevant words from your documents.
+  - Results are sorted by relevance to your search query.
+  - Highlighting shows you which parts of the document matched the query.
+  - Searching for similar documents ("More like this")
+- **Email processing**[^1]: import documents from your email accounts:
+  - Configure multiple accounts and rules for each account.
+  - After processing, paperless can perform actions on the messages such as marking as read, deleting and more.
+- A built-in robust **multi-user permissions** system that supports 'global' permissions as well as per document or object.
+- A powerful workflow system that gives you even more control.
+- **Optimized** for multi core systems: Paperless-ngx consumes multiple documents in parallel.
+- The integrated sanity checker makes sure that your document archive is in good health.
 
 [^1]: Office document and email consumption support is optional and provided by Apache Tika (see [configuration](https://docs.paperless-ngx.com/configuration/#tika))
 

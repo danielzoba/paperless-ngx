@@ -2,37 +2,58 @@ import json
 import tempfile
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.db import connection
 from django.test import TestCase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
-from guardian.shortcuts import assign_perm
 from rest_framework import status
 
+from documents.caching import get_llm_suggestion_cache
+from documents.caching import get_suggestion_cache_key
+from documents.caching import set_llm_suggestions_cache
+from documents.models import Correspondent
 from documents.models import Document
+from documents.models import DocumentType
 from documents.models import ShareLink
+from documents.models import StoragePath
 from documents.models import Tag
-from documents.tests.utils import DirectoriesMixin
+from documents.models import UiSettings
+from documents.signals.handlers import update_llm_suggestions_cache
 from paperless.models import ApplicationConfiguration
+from paperless_ai.exceptions import LLMProviderError
+from paperless_ai.exceptions import LLMTimeoutError
+from paperless_testing.dirs import DirectoriesMixin
+from paperless_testing.factories import UserFactory
+from paperless_testing.http import read_streaming_response
+from paperless_testing.permissions import grant_global
+from paperless_testing.permissions import grant_object
 
 
 class TestViews(DirectoriesMixin, TestCase):
+    @classmethod
+    def setUpTestData(cls) -> None:
+        super().setUpTestData()
+        ApplicationConfiguration.objects.get_or_create()
+
     def setUp(self) -> None:
-        self.user = User.objects.create_user("testuser")
+        self.user = UserFactory(username="testuser")
         super().setUp()
 
-    def test_login_redirect(self):
+    def test_login_redirect(self) -> None:
         response = self.client.get("/")
         self.assertEqual(response.status_code, status.HTTP_302_FOUND)
         self.assertEqual(response.url, "/accounts/login/?next=/")
 
-    def test_index(self):
+    def test_index(self) -> None:
         self.client.force_login(self.user)
         for language_given, language_actual in [
             ("", "en-US"),
@@ -63,10 +84,6 @@ class TestViews(DirectoriesMixin, TestCase):
                 f"frontend/{language_actual}/styles.css",
             )
             self.assertEqual(
-                response.context_data["runtime_js"],
-                f"frontend/{language_actual}/runtime.js",
-            )
-            self.assertEqual(
                 response.context_data["polyfills_js"],
                 f"frontend/{language_actual}/polyfills.js",
             )
@@ -76,7 +93,7 @@ class TestViews(DirectoriesMixin, TestCase):
             )
 
     @override_settings(BASE_URL="/paperless/")
-    def test_index_app_logo_with_base_url(self):
+    def test_index_app_logo_with_base_url(self) -> None:
         """
         GIVEN:
             - Existing config with app_logo specified
@@ -95,7 +112,7 @@ class TestViews(DirectoriesMixin, TestCase):
             f"/paperless{config.app_logo}",
         )
 
-    def test_share_link_views(self):
+    def test_share_link_views(self) -> None:
         """
         GIVEN:
             - Share link created
@@ -126,6 +143,7 @@ class TestViews(DirectoriesMixin, TestCase):
             codename__contains="sharelink",
         )
         self.user.user_permissions.add(*sharelink_permissions)
+        grant_global(self.user, "view_document")
         self.user.save()
 
         self.client.force_login(self.user)
@@ -144,7 +162,7 @@ class TestViews(DirectoriesMixin, TestCase):
         # Valid
         response = self.client.get(f"/share/{sl1.slug}")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.content, content)
+        self.assertEqual(read_streaming_response(response), content)
 
         # Invalid
         response = self.client.get("/share/123notaslug", follow=True)
@@ -161,7 +179,51 @@ class TestViews(DirectoriesMixin, TestCase):
         self.assertEqual(response.request["PATH_INFO"], "/accounts/login/")
         self.assertContains(response, b"Share link has expired")
 
-    def test_list_with_full_permissions(self):
+    def test_share_link_archive_falls_back_to_original(self) -> None:
+        """
+        GIVEN:
+            - A document without an archive version
+            - A share link using the default archive file version
+        WHEN:
+            - An unauthenticated request for the share link is made
+        THEN:
+            - The original document is returned
+        """
+        _, filename = tempfile.mkstemp(dir=self.dirs.originals_dir)
+        content = b"This document has no archive"
+
+        with Path(filename).open("wb") as f:
+            f.write(content)
+
+        doc = Document.objects.create(
+            title="no archive",
+            filename=Path(filename).name,
+            mime_type="text/plain",
+        )
+
+        sharelink_permissions = Permission.objects.filter(
+            codename__contains="sharelink",
+        )
+        self.user.user_permissions.add(*sharelink_permissions)
+        grant_global(self.user, "view_document")
+        self.client.force_login(self.user)
+
+        create_response = self.client.post(
+            "/api/share_links/",
+            {"document": doc.pk},
+        )
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        share_link = ShareLink.objects.get(document=doc)
+        self.assertEqual(share_link.file_version, ShareLink.FileVersion.ARCHIVE)
+
+        self.client.logout()
+
+        response = self.client.get(f"/share/{share_link.slug}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(read_streaming_response(response), content)
+
+    def test_list_with_full_permissions(self) -> None:
         """
         GIVEN:
             - Tags with different permissions
@@ -176,16 +238,16 @@ class TestViews(DirectoriesMixin, TestCase):
         group2 = Group.objects.create(name="group2")
         group3 = Group.objects.create(name="group3")
         t1 = Tag.objects.create(name="invoice", pk=1)
-        assign_perm("view_tag", self.user, t1)
-        assign_perm("view_tag", user2, t1)
-        assign_perm("view_tag", user3, t1)
-        assign_perm("view_tag", group1, t1)
-        assign_perm("view_tag", group2, t1)
-        assign_perm("view_tag", group3, t1)
-        assign_perm("change_tag", self.user, t1)
-        assign_perm("change_tag", user2, t1)
-        assign_perm("change_tag", group1, t1)
-        assign_perm("change_tag", group2, t1)
+        grant_object(self.user, t1, "view_tag")
+        grant_object(user2, t1, "view_tag")
+        grant_object(user3, t1, "view_tag")
+        grant_object(group1, t1, "view_tag")
+        grant_object(group2, t1, "view_tag")
+        grant_object(group3, t1, "view_tag")
+        grant_object(self.user, t1, "change_tag")
+        grant_object(user2, t1, "change_tag")
+        grant_object(group1, t1, "change_tag")
+        grant_object(group2, t1, "change_tag")
 
         Tag.objects.create(name="bank statement", pk=2)
         d1 = Document.objects.create(
@@ -230,7 +292,34 @@ class TestViews(DirectoriesMixin, TestCase):
             else:
                 assert False, f"Unexpected tag found: {tag['name']}"
 
-    def test_list_no_n_plus_1_queries(self):
+    def test_retrieve_with_full_permissions(self) -> None:
+        """
+        GIVEN:
+            - A tag with view granted to two groups and change granted to only
+              one of them
+        WHEN:
+            - The single tag is requested with full permissions
+        THEN:
+            - Each action lists only the groups granted that action
+        """
+        view_only = Group.objects.create(name="view_only")
+        view_and_change = Group.objects.create(name="view_and_change")
+        tag = Tag.objects.create(name="invoice")
+        grant_object(view_only, tag, "view_tag")
+        grant_object(view_and_change, tag, "view_tag", "change_tag")
+        grant_global(self.user, "view_tag")
+
+        self.client.force_login(self.user)
+        response = self.client.get(f"/api/tags/{tag.pk}/?full_perms=true")
+
+        assert response.status_code == 200
+        permissions = response.json()["permissions"]
+        assert sorted(permissions["view"]["groups"]) == sorted(
+            [view_only.pk, view_and_change.pk],
+        )
+        assert permissions["change"]["groups"] == [view_and_change.pk]
+
+    def test_list_no_n_plus_1_queries(self) -> None:
         """
         GIVEN:
             - Tags with different permissions
@@ -270,3 +359,750 @@ class TestViews(DirectoriesMixin, TestCase):
             f"Possible N+1 queries detected: {num_queries_small} queries for 2 tags, "
             f"but {num_queries_large} queries for 50 tags"
         )
+
+
+class TestAISuggestions(DirectoriesMixin, TestCase):
+    def setUp(self) -> None:
+        self.user = UserFactory(username="testuser", superuser=True)
+        self.document = Document.objects.create(
+            title="Test Document",
+            filename="test.pdf",
+            mime_type="application/pdf",
+        )
+        self.tag1 = Tag.objects.create(name="tag1")
+        self.correspondent1 = Correspondent.objects.create(name="correspondent1")
+        self.document_type1 = DocumentType.objects.create(name="type1")
+        self.path1 = StoragePath.objects.create(name="path1")
+        super().setUp()
+
+    @patch("documents.views.get_llm_suggestion_cache")
+    @patch("documents.views.refresh_llm_suggestions_cache")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_with_cached_llm(
+        self,
+        mock_refresh_cache,
+        mock_get_cache,
+    ) -> None:
+        """
+        GIVEN:
+            - A cached LLM classification holding the raw existing_ids/
+              new_names choices (never resolved object ids)
+        WHEN:
+            - ai_suggestions is requested
+        THEN:
+            - The cached choices are resolved into ids for this request
+              (not returned verbatim from the cache) and the cache's TTL is
+              refreshed
+        """
+        mock_get_cache.return_value = MagicMock(
+            suggestions={
+                "title": "Cached Title",
+                "tags": {"existing_ids": [self.tag1.pk], "new_names": []},
+                "correspondents": {"existing_ids": [], "new_names": []},
+                "document_types": {"existing_ids": [], "new_names": []},
+                "storage_paths": {"existing_ids": [], "new_names": []},
+                "dates": [],
+            },
+        )
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["title"], "Cached Title")
+        self.assertEqual(response.json()["tags"], [self.tag1.pk])
+        mock_get_cache.assert_called_once_with(
+            self.document.pk,
+            backend=f"mock_backend:user={self.user.pk}",
+        )
+        mock_refresh_cache.assert_called_once_with(
+            self.document.pk,
+            backend=f"mock_backend:user={self.user.pk}",
+        )
+
+    @patch("documents.views.get_llm_suggestion_cache")
+    @patch("documents.views.refresh_llm_suggestions_cache")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_cache_hit_re_filters_for_narrower_requester(
+        self,
+        mock_refresh_cache,
+        mock_get_cache,
+    ) -> None:
+        """
+        GIVEN:
+            - A cached LLM classification whose existing_ids include a tag
+              only visible to a broader-visibility user (e.g. the requester
+              who originally generated it)
+            - A second, non-superuser requester who may change the document
+              but has no permission to view that tag
+        WHEN:
+            - ai_suggestions is requested by the second requester and the
+              cache is hit
+        THEN:
+            - The cache hit still runs permission filtering fresh for this
+              requester; the invisible tag id does not leak into either the
+              matched or suggested tags
+        """
+        tag_owner = UserFactory(username="cache_tag_owner")
+        invisible_tag = Tag.objects.create(name="cache_restricted", owner=tag_owner)
+        requester = UserFactory(username="cache_requester")
+        grant_global(requester, "view_document", "change_document", "view_tag")
+        mock_get_cache.return_value = MagicMock(
+            suggestions={
+                "title": "Untitled",
+                "tags": {"existing_ids": [invisible_tag.pk], "new_names": []},
+                "correspondents": {"existing_ids": [], "new_names": []},
+                "document_types": {"existing_ids": [], "new_names": []},
+                "storage_paths": {"existing_ids": [], "new_names": []},
+                "dates": [],
+            },
+        )
+
+        self.client.force_login(user=requester)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["tags"], [])
+        self.assertEqual(response.json()["suggested_tags"], [])
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_with_ai_enabled(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        mock_get_ai_classification.return_value = {
+            "title": "AI Title",
+            "tags": {"existing_ids": [self.tag1.pk], "new_names": ["tag2"]},
+            "correspondents": {
+                "existing_ids": [self.correspondent1.pk],
+                "new_names": [],
+            },
+            "document_types": {
+                "existing_ids": [self.document_type1.pk],
+                "new_names": [],
+            },
+            "storage_paths": {"existing_ids": [self.path1.pk], "new_names": []},
+            "dates": ["2023-01-01"],
+        }
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.json(),
+            {
+                "title": "AI Title",
+                "tags": [self.tag1.pk],
+                "suggested_tags": ["tag2"],
+                "correspondents": [self.correspondent1.pk],
+                "suggested_correspondents": [],
+                "document_types": [self.document_type1.pk],
+                "suggested_document_types": [],
+                "storage_paths": [self.path1.pk],
+                "suggested_storage_paths": [],
+                "dates": ["2023-01-01"],
+            },
+        )
+        mock_get_ai_classification.assert_called_once_with(
+            self.document,
+            self.user,
+            None,
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_uses_user_display_language(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        UiSettings.objects.create(user=self.user, settings={"language": "de-de"})
+        mock_get_ai_classification.return_value = {
+            "title": "KI Title",
+            "tags": {"existing_ids": [], "new_names": []},
+            "correspondents": {"existing_ids": [], "new_names": []},
+            "document_types": {"existing_ids": [], "new_names": []},
+            "storage_paths": {"existing_ids": [], "new_names": []},
+            "dates": [],
+        }
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_get_ai_classification.assert_called_once_with(
+            self.document,
+            self.user,
+            "de-de",
+        )
+        self.assertEqual(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend=f"mock_backend:de-de:user={self.user.pk}",
+            ).suggestions["title"],
+            "KI Title",
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+        LLM_OUTPUT_LANGUAGE="fr-fr",
+    )
+    def test_ai_suggestions_configured_language_takes_precedence(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        UiSettings.objects.create(user=self.user, settings={"language": "de-de"})
+        mock_get_ai_classification.return_value = {
+            "title": "Titre IA",
+            "tags": {"existing_ids": [], "new_names": []},
+            "correspondents": {"existing_ids": [], "new_names": []},
+            "document_types": {"existing_ids": [], "new_names": []},
+            "storage_paths": {"existing_ids": [], "new_names": []},
+            "dates": [],
+        }
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_get_ai_classification.assert_called_once_with(
+            self.document,
+            self.user,
+            "fr-fr",
+        )
+        self.assertEqual(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend=f"mock_backend:fr-fr:user={self.user.pk}",
+            ).suggestions["title"],
+            "Titre IA",
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+        LLM_MODEL="model-a",
+        LLM_ENDPOINT="http://endpoint-a",
+    )
+    def test_ai_suggestions_cache_key_includes_model_and_endpoint(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        """Cached suggestions are keyed by model and endpoint, so switching
+        either yields a cache miss instead of a stale hit."""
+        mock_get_ai_classification.return_value = {
+            "title": "Answer A",
+            "tags": {"existing_ids": [], "new_names": []},
+            "correspondents": {"existing_ids": [], "new_names": []},
+            "document_types": {"existing_ids": [], "new_names": []},
+            "storage_paths": {"existing_ids": [], "new_names": []},
+            "dates": [],
+        }
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Cached under a key that carries model + endpoint...
+        self.assertIsNotNone(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend=(f"mock_backend:model-a:http://endpoint-a:user={self.user.pk}"),
+            ),
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_cache_variants_coexist_per_requesting_user(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        """
+        GIVEN:
+            - One user has populated the document's LLM suggestion cache
+            - A second user requests suggestions for the same document and
+              backend
+        WHEN:
+            - The second request is made
+        THEN:
+            - The first user's prompt-derived result is not reused
+            - The classification runs with the second user's visibility
+              context without evicting the first user's result
+        """
+        second_user = UserFactory(username="second_user", superuser=True)
+        empty_choices = {
+            "tags": {"existing_ids": [], "new_names": []},
+            "correspondents": {"existing_ids": [], "new_names": []},
+            "document_types": {"existing_ids": [], "new_names": []},
+            "storage_paths": {"existing_ids": [], "new_names": []},
+            "dates": [],
+        }
+        mock_get_ai_classification.side_effect = [
+            {"title": "First user's result", **empty_choices},
+            {"title": "Second user's result", **empty_choices},
+        ]
+
+        self.client.force_login(user=self.user)
+        first_response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+        self.client.force_login(user=second_user)
+        second_response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+        self.client.force_login(user=self.user)
+        first_cached_response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(first_response.json()["title"], "First user's result")
+        self.assertEqual(second_response.json()["title"], "Second user's result")
+        self.assertEqual(
+            first_cached_response.json()["title"],
+            "First user's result",
+        )
+        self.assertEqual(mock_get_ai_classification.call_count, 2)
+        mock_get_ai_classification.assert_called_with(
+            self.document,
+            second_user,
+            None,
+        )
+        self.assertIsNotNone(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend=f"mock_backend:user={second_user.pk}",
+            ),
+        )
+        self.assertIsNotNone(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend=f"mock_backend:user={self.user.pk}",
+            ),
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="openai-like",
+    )
+    def test_ai_suggestions_with_invalid_ai_configuration(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        mock_get_ai_classification.side_effect = ValueError(
+            "Unknown model 'gpt-5.4-mini-2026-03-17'.",
+        )
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.json(),
+            {
+                "ai": ["Invalid AI configuration."],
+            },
+        )
+        self.assertIsNone(
+            get_llm_suggestion_cache(self.document.pk, backend="openai-like"),
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="openai-like",
+    )
+    def test_ai_suggestions_with_llm_timeout(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        mock_get_ai_classification.side_effect = LLMTimeoutError()
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(
+            response.json(),
+            {
+                "ai": ["AI backend request timed out."],
+            },
+        )
+        self.assertIsNone(
+            get_llm_suggestion_cache(self.document.pk, backend="openai-like"),
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="openai-like",
+    )
+    def test_ai_suggestions_with_llm_provider_error(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        mock_get_ai_classification.side_effect = LLMProviderError(
+            "confidential provider response",
+        )
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertEqual(
+            response.json(),
+            {
+                "ai": [
+                    "AI backend rejected the request. Check logs for details.",
+                ],
+            },
+        )
+        self.assertNotIn("confidential provider response", response.content.decode())
+        self.assertIsNone(
+            get_llm_suggestion_cache(self.document.pk, backend="openai-like"),
+        )
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_combines_existing_ids_and_new_names(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        """
+        GIVEN:
+            - AI classification returns a taxonomy choice with both an
+              existing tag id and a new tag name not present in the database
+        WHEN:
+            - ai_suggestions is requested
+        THEN:
+            - the existing id is resolved into the matched tags list
+            - the new name is fuzzy-matched, and since it doesn't match any
+              existing tag, it is surfaced as a suggested tag
+        """
+        mock_get_ai_classification.return_value = {
+            "title": "Lab Report",
+            "tags": {"existing_ids": [self.tag1.pk], "new_names": ["Follow-up"]},
+            "correspondents": {"existing_ids": [], "new_names": []},
+            "document_types": {"existing_ids": [], "new_names": []},
+            "storage_paths": {"existing_ids": [], "new_names": []},
+            "dates": [],
+        }
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["tags"], [self.tag1.pk])
+        self.assertEqual(response.json()["suggested_tags"], ["Follow-up"])
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_deduplicates_id_matched_via_both_paths(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        """
+        GIVEN:
+            - AI classification returns the same tag both as an existing_id
+              and as a new_name that fuzzy-matches that same tag
+        WHEN:
+            - ai_suggestions is requested
+        THEN:
+            - The tag's id appears exactly once in the response, not twice
+        """
+        mock_get_ai_classification.return_value = {
+            "title": "Lab Report",
+            "tags": {
+                "existing_ids": [self.tag1.pk],
+                "new_names": [self.tag1.name],
+            },
+            "correspondents": {"existing_ids": [], "new_names": []},
+            "document_types": {"existing_ids": [], "new_names": []},
+            "storage_paths": {"existing_ids": [], "new_names": []},
+            "dates": [],
+        }
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["tags"], [self.tag1.pk])
+        self.assertEqual(response.json()["suggested_tags"], [])
+
+    @patch("paperless_ai.ai_classifier.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_existing_id_not_visible_falls_through_to_suggested(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        """
+        GIVEN:
+            - A non-superuser who may change the document but has no
+              permission to view a tag owned by somebody else
+            - AI classification returns that tag's id in existing_ids (e.g.
+              from a cached response generated for a broader-visibility user)
+        WHEN:
+            - ai_suggestions is requested by that user
+        THEN:
+            - the invisible id is silently dropped by resolve_tag_ids, so
+              permission filtering survives the full request path
+            - it does not appear in either the matched or suggested tags
+        """
+        tag_owner = UserFactory(username="tagowner")
+        invisible_tag = Tag.objects.create(name="restricted", owner=tag_owner)
+        requester = UserFactory(username="requester")
+        grant_global(requester, "view_document", "change_document", "view_tag")
+
+        mock_get_ai_classification.return_value = {
+            "title": "Untitled",
+            "tags": {"existing_ids": [invisible_tag.pk], "new_names": []},
+            "correspondents": {"existing_ids": [], "new_names": []},
+            "document_types": {"existing_ids": [], "new_names": []},
+            "storage_paths": {"existing_ids": [], "new_names": []},
+            "dates": [],
+        }
+
+        self.client.force_login(user=requester)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["tags"], [])
+        self.assertEqual(response.json()["suggested_tags"], [])
+
+    def test_document_save_invalidates_all_suggestion_caches(self) -> None:
+        suggestions = {
+            "title": "AI Title",
+            "tags": ["tag1", "tag2"],
+            "correspondents": ["correspondent1"],
+            "document_types": ["type1"],
+            "storage_paths": ["path1"],
+            "dates": ["2023-01-01"],
+        }
+        standard_cache_key = get_suggestion_cache_key(self.document.pk)
+        cache.set(standard_cache_key, "classifier suggestions")
+        set_llm_suggestions_cache(
+            self.document.pk,
+            suggestions,
+            backend="mock_backend",
+        )
+        set_llm_suggestions_cache(
+            self.document.pk,
+            {**suggestions, "title": "Other Variant"},
+            backend="other_backend:user=2",
+        )
+        self.assertEqual(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend="mock_backend",
+            ).suggestions,
+            suggestions,
+        )
+        self.assertEqual(cache.get(standard_cache_key), "classifier suggestions")
+
+        update_llm_suggestions_cache(
+            sender=None,
+            instance=self.document,
+        )
+
+        self.assertIsNone(cache.get(standard_cache_key))
+        self.assertIsNone(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend="mock_backend",
+            ),
+        )
+        self.assertIsNone(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend="other_backend:user=2",
+            ),
+        )
+
+
+class TestAIChatStreamingView(DirectoriesMixin, TestCase):
+    ENDPOINT = "/api/documents/chat/"
+
+    def setUp(self) -> None:
+        self.user = UserFactory(username="testuser", password="pass")
+        self.client.force_login(user=self.user)
+        self.document = Document.objects.create(
+            title="Test Document",
+            filename="test.pdf",
+            mime_type="application/pdf",
+        )
+        super().setUp()
+
+    def grant_view_document_permission(self) -> None:
+        grant_global(self.user, "view_document")
+
+    @override_settings(AI_ENABLED=False)
+    def test_post_ai_disabled(self) -> None:
+        self.grant_view_document_permission()
+        response = self.client.post(
+            self.ENDPOINT,
+            data='{"q": "question"}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"AI is required for this feature", response.content)
+
+    @patch("paperless_ai.chat.stream_chat_with_documents")
+    @patch("documents.views.permitted_document_ids")
+    @override_settings(AI_ENABLED=True)
+    def test_post_no_document_id(self, mock_permitted_ids, mock_stream_chat) -> None:
+        self.grant_view_document_permission()
+        mock_permitted_ids.return_value = [self.document.pk]
+        mock_stream_chat.return_value = iter([b"data"])
+        response = self.client.post(
+            self.ENDPOINT,
+            data='{"q": "question"}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+        mock_stream_chat.assert_called_once()
+        call_kwargs = mock_stream_chat.call_args.kwargs
+        self.assertEqual(call_kwargs["query_str"], "question")
+        self.assertEqual(list(call_kwargs["documents"]), [self.document])
+        self.assertIsNone(call_kwargs["output_language"])
+
+    @patch("paperless_ai.chat.stream_chat_with_documents")
+    @patch("documents.views.permitted_document_ids")
+    @override_settings(AI_ENABLED=True)
+    def test_post_uses_user_display_language(
+        self,
+        mock_permitted_ids,
+        mock_stream_chat,
+    ) -> None:
+        UiSettings.objects.create(user=self.user, settings={"language": "de-de"})
+        self.grant_view_document_permission()
+        mock_permitted_ids.return_value = [self.document.pk]
+        mock_stream_chat.return_value = iter([b"data"])
+
+        response = self.client.post(
+            self.ENDPOINT,
+            data='{"q": "question"}',
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        mock_stream_chat.assert_called_once()
+        call_kwargs = mock_stream_chat.call_args.kwargs
+        self.assertEqual(call_kwargs["query_str"], "question")
+        self.assertEqual(list(call_kwargs["documents"]), [self.document])
+        self.assertEqual(call_kwargs["output_language"], "de-de")
+
+    @patch("paperless_ai.chat.stream_chat_with_documents")
+    @override_settings(AI_ENABLED=True)
+    def test_post_with_document_id(self, mock_stream_chat) -> None:
+        self.grant_view_document_permission()
+        mock_stream_chat.return_value = iter([b"data"])
+        response = self.client.post(
+            self.ENDPOINT,
+            data=f'{{"q": "question", "document_id": {self.document.pk}}}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+
+    @override_settings(AI_ENABLED=True)
+    def test_post_with_invalid_document_id(self) -> None:
+        self.grant_view_document_permission()
+        response = self.client.post(
+            self.ENDPOINT,
+            data='{"q": "question", "document_id": 999999}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Document not found", response.content)
+
+    @patch("documents.views.has_perms_owner_aware")
+    @override_settings(AI_ENABLED=True)
+    def test_post_with_document_id_no_permission(self, mock_has_perms) -> None:
+        self.grant_view_document_permission()
+        mock_has_perms.return_value = False
+        response = self.client.post(
+            self.ENDPOINT,
+            data=f'{{"q": "question", "document_id": {self.document.pk}}}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn(b"Insufficient permissions", response.content)
+
+    @patch("paperless_ai.chat.stream_chat_with_documents")
+    @override_settings(AI_ENABLED=True)
+    def test_post_no_document_id_requires_view_document_permission(
+        self,
+        mock_stream_chat,
+    ) -> None:
+        response = self.client.post(
+            self.ENDPOINT,
+            data='{"q": "question"}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        mock_stream_chat.assert_not_called()
+
+    @patch("paperless_ai.chat.stream_chat_with_documents")
+    @override_settings(AI_ENABLED=True)
+    def test_post_with_document_id_requires_view_document_permission(
+        self,
+        mock_stream_chat,
+    ) -> None:
+        response = self.client.post(
+            self.ENDPOINT,
+            data=f'{{"q": "question", "document_id": {self.document.pk}}}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        mock_stream_chat.assert_not_called()

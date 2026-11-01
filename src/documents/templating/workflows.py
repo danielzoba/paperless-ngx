@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterable
 from datetime import date
 from datetime import datetime
 from pathlib import Path
@@ -6,12 +7,16 @@ from pathlib import Path
 from django.utils.text import slugify as django_slugify
 from jinja2 import StrictUndefined
 from jinja2 import Template
+from jinja2 import TemplateAssertionError
 from jinja2 import TemplateSyntaxError
 from jinja2 import UndefinedError
 from jinja2 import make_logging_undefined
+from jinja2.meta import find_undeclared_variables
 from jinja2.sandbox import SecurityError
 
+from documents.models import CustomFieldInstance
 from documents.templating.environment import _template_environment
+from documents.templating.filepath import get_custom_fields_context
 from documents.templating.filters import format_datetime
 from documents.templating.filters import localize_date
 
@@ -29,6 +34,50 @@ _template_environment.filters["slugify"] = django_slugify
 _template_environment.filters["localize_date"] = localize_date
 
 
+_known_placeholder_names = {
+    "correspondent",
+    "document_type",
+    "added",
+    "added_year",
+    "added_year_short",
+    "added_month",
+    "added_month_name",
+    "added_month_name_short",
+    "added_day",
+    "added_time",
+    "owner_username",
+    "original_filename",
+    "filename",
+    "created",
+    "created_year",
+    "created_year_short",
+    "created_month",
+    "created_month_name",
+    "created_month_name_short",
+    "created_day",
+    "created_time",
+    "doc_title",
+    "doc_url",
+    "doc_id",
+    "custom_fields",
+}
+
+
+def validate_workflow_template(text: str) -> None:
+    try:
+        ast = _template_environment.parse(text)
+        undeclared_vars = find_undeclared_variables(ast)
+    except TemplateAssertionError as e:
+        raise ValueError(f"Template assertion error: {e}")
+    except TemplateSyntaxError as e:
+        raise ValueError(f"Template syntax error: {e}")
+    unknown_vars = undeclared_vars - _known_placeholder_names
+    if unknown_vars:
+        raise KeyError(
+            f"Template references unknown placeholders: {', '.join(unknown_vars)}",
+        )
+
+
 def parse_w_workflow_placeholders(
     text: str,
     correspondent_name: str,
@@ -40,6 +89,8 @@ def parse_w_workflow_placeholders(
     created: date | None = None,
     doc_title: str | None = None,
     doc_url: str | None = None,
+    doc_id: int | None = None,
+    custom_fields: Iterable[CustomFieldInstance] = (),
 ) -> str:
     """
     Available title placeholders for Workflows depend on what has already been assigned,
@@ -62,6 +113,7 @@ def parse_w_workflow_placeholders(
         "original_filename": Path(original_filename).stem,
         "filename": Path(filename).stem,
     }
+    formatting.update(get_custom_fields_context(custom_fields))
     if created is not None:
         formatting.update(
             {
@@ -79,6 +131,8 @@ def parse_w_workflow_placeholders(
         formatting.update({"doc_title": doc_title})
     if doc_url is not None:
         formatting.update({"doc_url": doc_url})
+    if doc_id is not None:
+        formatting.update({"doc_id": str(doc_id)})
 
     logger.debug(f"Parsing Workflow Jinja template: {text}")
     try:

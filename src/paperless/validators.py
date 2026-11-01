@@ -1,6 +1,9 @@
+from io import BytesIO
+
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import UploadedFile
-from lxml import etree
+from PIL import Image
 
 ALLOWED_SVG_TAGS: set[str] = {
     # Basic shapes
@@ -182,6 +185,7 @@ def reject_dangerous_svg(file: UploadedFile) -> None:
     Raises ValidationError if unsafe content is found.
     See GHSA-6p53-hqqw-8j62
     """
+    from lxml import etree
 
     try:
         parser = etree.XMLParser(resolve_entities=False)
@@ -254,3 +258,30 @@ def reject_dangerous_svg(file: UploadedFile) -> None:
                     raise ValidationError(
                         f"URI scheme not allowed in {attr_name}: must be #anchor, relative path, or data:image/*",
                     )
+
+
+def validate_raster_image(file: UploadedFile) -> None:
+    """
+    Validates that the uploaded file is a valid raster image (JPEG, PNG, etc.)
+    and does not exceed maximum pixel limits.
+    Raises ValidationError if the image is invalid or exceeds the allowed size.
+    """
+
+    file.seek(0)
+    image_data = file.read()
+    try:
+        with Image.open(BytesIO(image_data)) as image:
+            image.verify()
+
+            if (
+                settings.MAX_IMAGE_PIXELS is not None
+                and settings.MAX_IMAGE_PIXELS > 0
+                and image.width * image.height > settings.MAX_IMAGE_PIXELS
+            ):
+                raise ValidationError(
+                    "Uploaded logo exceeds the maximum allowed image size.",
+                )
+            if image.format is None:  # pragma: no cover
+                raise ValidationError("Invalid logo image.")
+    except (OSError, Image.DecompressionBombError) as e:
+        raise ValidationError("Invalid logo image.") from e

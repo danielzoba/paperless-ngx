@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM --platform=$BUILDPLATFORM docker.io/node:20-trixie-slim as main-app
+FROM --platform=$BUILDPLATFORM docker.io/node:24-trixie-slim as main-app
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -39,7 +39,6 @@ ARG RUNTIME_PACKAGES="\
   ghostscript \
   gnupg \
   icc-profiles-free \
-  imagemagick \
   # PostgreSQL
   postgresql-client \
   # MySQL / MariaDB
@@ -64,8 +63,6 @@ ARG RUNTIME_PACKAGES="\
   libmagic1 \
   media-types \
   zlib1g \
-  # Barcode splitter
-  libzbar0 \
   poppler-utils \
   htop \
   sudo"
@@ -94,21 +91,6 @@ RUN set -eux \
         --output jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
         https://github.com/paperless-ngx/builder/releases/download/jbig2enc-trixie-v${JBIG2ENC_VERSION}/jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb \
       && dpkg --install ./jbig2enc_${JBIG2ENC_VERSION}-1_${TARGETARCH}.deb
-
-# setup docker-specific things
-# These change sometimes, but rarely
-WORKDIR /usr/src/paperless/src/docker/
-
-COPY [ \
-  "docker/rootfs/etc/ImageMagick-6/paperless-policy.xml", \
-  "./" \
-]
-
-RUN set -eux \
-  && echo "Configuring ImageMagick" \
-    && mkdir -p /etc/ImageMagick-6 \
-    && mv paperless-policy.xml /etc/ImageMagick-6/policy.xml
-
 
 # Packages needed only for building a few quick Python
 # dependencies

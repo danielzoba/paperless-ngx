@@ -1,24 +1,26 @@
 from datetime import date
 
-from django.contrib.auth.models import Permission
-from django.contrib.auth.models import User
 from django.core.cache import cache
 from rest_framework import status
 from rest_framework.test import APITestCase
 
 from documents.models import Document
+from paperless_testing.dirs import DirectoriesMixin
+from paperless_testing.factories import DocumentFactory
+from paperless_testing.factories import UserFactory
+from paperless_testing.permissions import grant_all_global
 
 
-class TestTrashAPI(APITestCase):
-    def setUp(self):
+class TestTrashAPI(DirectoriesMixin, APITestCase):
+    def setUp(self) -> None:
         super().setUp()
 
-        self.user = User.objects.create_user(username="temp_admin")
-        self.user.user_permissions.add(*Permission.objects.all())
+        self.user = UserFactory(username="temp_admin")
+        grant_all_global(self.user)
         self.client.force_authenticate(user=self.user)
         cache.clear()
 
-    def test_api_trash(self):
+    def test_api_trash(self) -> None:
         """
         GIVEN:
             - Existing document
@@ -68,7 +70,17 @@ class TestTrashAPI(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(Document.global_objects.count(), 0)
 
-    def test_trash_api_empty_all(self):
+    def test_trash_list_requires_global_document_view_permission(self) -> None:
+        user = UserFactory(username="trash_owner")
+        document = Document.objects.create(title="Owned", owner=user)
+        document.delete()
+        self.client.force_authenticate(user)
+
+        response = self.client.get("/api/trash/")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_trash_api_empty_all(self) -> None:
         """
         GIVEN:
             - Existing documents in trash
@@ -101,7 +113,7 @@ class TestTrashAPI(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(Document.global_objects.count(), 0)
 
-    def test_api_trash_show_owned_only(self):
+    def test_api_trash_show_owned_only(self) -> None:
         """
         GIVEN:
             - Existing documents in trash
@@ -129,7 +141,7 @@ class TestTrashAPI(APITestCase):
             created=date(2023, 1, 2),
         )
         document_not_owned.delete()
-        user2 = User.objects.create_user(username="user2")
+        user2 = UserFactory(username="user2")
         document_u2 = Document.objects.create(
             title="Title3",
             content="content3",
@@ -147,13 +159,13 @@ class TestTrashAPI(APITestCase):
         self.assertEqual(resp.data["results"][1]["id"], document_u1.pk)
 
         # superuser sees all documents
-        superuser = User.objects.create_superuser(username="superuser")
+        superuser = UserFactory(username="superuser", superuser=True)
         self.client.force_authenticate(user=superuser)
         resp = self.client.get("/api/trash/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["count"], 3)
 
-    def test_api_trash_insufficient_permissions(self):
+    def test_api_trash_insufficient_permissions(self) -> None:
         """
         GIVEN:
             - Existing document with owner = user2 in trash
@@ -163,7 +175,7 @@ class TestTrashAPI(APITestCase):
             - 403 Forbidden
         """
 
-        user2 = User.objects.create_user(username="user2")
+        user2 = UserFactory(username="user2")
         document = Document.objects.create(
             title="Title",
             content="content",
@@ -180,7 +192,7 @@ class TestTrashAPI(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(Document.global_objects.count(), 1)
 
-    def test_api_trash_invalid_params(self):
+    def test_api_trash_invalid_params(self) -> None:
         """
         GIVEN:
             - Existing documents
@@ -206,3 +218,115 @@ class TestTrashAPI(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("have not yet been deleted", resp.data["documents"][0])
+
+    def _make_versioned_document(self) -> tuple[Document, list[Document]]:
+        root = Document.objects.create(
+            title="root",
+            content="root-content",
+            checksum="root",
+            mime_type="application/pdf",
+        )
+        versions = [
+            Document.objects.create(
+                title=f"v{index}",
+                content=f"v{index}-content",
+                checksum=f"v{index}",
+                mime_type="application/pdf",
+                root_document=root,
+                version_index=index,
+            )
+            for index in range(1, 3)
+        ]
+        return root, versions
+
+    def test_api_trash_restore_document_restores_its_versions(self) -> None:
+        """
+        GIVEN:
+            - Existing document with two versions
+        WHEN:
+            - API request to delete the document
+            - API request to restore it from the trash
+        THEN:
+            - Only the document itself is listed in the trash
+            - A version cannot be restored without its root
+            - The document is restored together with all of its versions
+        """
+        root, versions = self._make_versioned_document()
+
+        self.client.force_login(user=self.user)
+        self.client.delete(f"/api/documents/{root.pk}/")
+        self.assertEqual(Document.deleted_objects.count(), 3)
+
+        resp = self.client.get("/api/trash/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["count"], 1)
+        self.assertEqual(resp.data["results"][0]["id"], root.pk)
+
+        # A version cannot be restored while its root remains in the trash.
+        resp = self.client.post(
+            "/api/trash/",
+            {"action": "restore", "documents": [versions[0].pk]},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Restore the root document", resp.data["documents"][0])
+
+        resp = self.client.post(
+            "/api/trash/",
+            {"action": "restore", "documents": [root.pk]},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(Document.deleted_objects.count(), 0)
+        self.assertCountEqual(
+            Document.objects.filter(root_document=root).values_list("id", flat=True),
+            [version.pk for version in versions],
+        )
+
+    def test_api_trash_version_follows_root_owner(self) -> None:
+        """
+        GIVEN:
+            - A deleted version of user2's document, owned by nobody
+            - A deleted version of the user's document, owned by user2
+        WHEN:
+            - The user lists the trash and tries to restore or empty the versions
+        THEN:
+            - Only the version of the user's own document is listed
+            - The other version can't be restored or emptied
+            - The version of the user's own document can be restored
+        """
+        user2 = UserFactory(username="user2")
+        other_version = DocumentFactory(
+            root_document=DocumentFactory(owner=user2),
+            version_index=1,
+        )
+        other_version.delete()
+        own_version = DocumentFactory(
+            owner=user2,
+            root_document=DocumentFactory(owner=self.user),
+            version_index=1,
+        )
+        own_version.delete()
+
+        resp = self.client.get("/api/trash/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [doc["id"] for doc in resp.data["results"]],
+            [own_version.pk],
+        )
+
+        for action in ("restore", "empty"):
+            with self.subTest(action=action):
+                resp = self.client.post(
+                    "/api/trash/",
+                    {"action": action, "documents": [other_version.pk]},
+                )
+                self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+                self.assertTrue(
+                    Document.deleted_objects.filter(pk=other_version.pk).exists(),
+                )
+
+        resp = self.client.post(
+            "/api/trash/",
+            {"action": "restore", "documents": [own_version.pk]},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(Document.objects.filter(pk=own_version.pk).exists())

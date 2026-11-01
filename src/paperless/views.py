@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from pathlib import Path
+from typing import Any
 
 from allauth.mfa import signals
 from allauth.mfa.adapter import get_adapter as get_mfa_adapter
@@ -9,6 +10,7 @@ from allauth.mfa.recovery_codes.internal.flows import auto_generate_recovery_cod
 from allauth.mfa.totp.internal import auth as totp_auth
 from allauth.socialaccount.adapter import get_adapter
 from allauth.socialaccount.models import SocialAccount
+from django.conf import settings
 from django.contrib.auth.models import Group
 from django.contrib.auth.models import User
 from django.contrib.staticfiles.storage import staticfiles_storage
@@ -25,16 +27,20 @@ from drf_spectacular.utils import extend_schema_view
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.fields import BooleanField
 from rest_framework.filters import OrderingFilter
 from rest_framework.generics import GenericAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import DjangoModelPermissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.viewsets import ModelViewSet
 
-from documents.index import DelayedQuery
+from documents.models import PaperlessTask
 from documents.permissions import PaperlessObjectPermissions
+from documents.tasks import llmindex_index
 from paperless.filters import GroupFilterSet
 from paperless.filters import UserFilterSet
 from paperless.models import ApplicationConfiguration
@@ -47,6 +53,8 @@ from paperless.serialisers import UserSerializer
 
 class PaperlessObtainAuthTokenView(ObtainAuthToken):
     serializer_class = PaperlessAuthTokenSerializer
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
 
 
 class StandardPagination(PageNumberPagination):
@@ -54,42 +62,47 @@ class StandardPagination(PageNumberPagination):
     page_size_query_param = "page_size"
     max_page_size = 100000
 
+    def _get_api_version(self) -> int:
+        request = getattr(self, "request", None)
+        default_version = settings.REST_FRAMEWORK["DEFAULT_VERSION"]
+        return int(request.version if request else default_version)
+
+    def _should_include_all(self) -> bool:
+        # TODO: remove legacy `all` support when API v9 is dropped.
+        return self._get_api_version() < 10
+
     def get_paginated_response(self, data):
+        response_data = [
+            ("count", self.page.paginator.count),
+            ("next", self.get_next_link()),
+            ("previous", self.get_previous_link()),
+        ]
+        if self._should_include_all():
+            response_data.append(("all", self.get_all_result_ids()))
+        response_data.append(("results", data))
+
         return Response(
-            OrderedDict(
-                [
-                    ("count", self.page.paginator.count),
-                    ("next", self.get_next_link()),
-                    ("previous", self.get_previous_link()),
-                    ("all", self.get_all_result_ids()),
-                    ("results", data),
-                ],
-            ),
+            OrderedDict(response_data),
         )
 
     def get_all_result_ids(self):
+        from documents.search import TantivyRelevanceList
+
         query = self.page.paginator.object_list
-        if isinstance(query, DelayedQuery):
-            try:
-                ids = [
-                    query.searcher.ixreader.stored_fields(
-                        doc_num,
-                    )["id"]
-                    for doc_num in query.saved_results.get(0).results.docs()
-                ]
-            except Exception:
-                pass
-        else:
-            ids = self.page.paginator.object_list.values_list("pk", flat=True)
-        return ids
+        if isinstance(query, TantivyRelevanceList):
+            return query.get_all_ids()
+        return self.page.paginator.object_list.values_list("pk", flat=True)
 
     def get_paginated_response_schema(self, schema):
         response_schema = super().get_paginated_response_schema(schema)
-        response_schema["properties"]["all"] = {
-            "type": "array",
-            "example": "[1, 2, 3]",
-            "items": {"type": "integer"},
-        }
+        if self._should_include_all():
+            response_schema["properties"]["all"] = {
+                "type": "array",
+                "example": "[1, 2, 3]",
+                "items": {"type": "integer"},
+            }
+        else:
+            response_schema["properties"].pop("all", None)
         return response_schema
 
 
@@ -102,7 +115,8 @@ class FaviconView(View):
             return HttpResponseNotFound("favicon.ico not found")
 
 
-class UserViewSet(ModelViewSet):
+class UserViewSet(ModelViewSet[User]):
+    _BOOL_NOT_PROVIDED = object()
     model = User
 
     queryset = User.objects.exclude(
@@ -116,28 +130,76 @@ class UserViewSet(ModelViewSet):
     filterset_class = UserFilterSet
     ordering_fields = ("username",)
 
+    @staticmethod
+    def _parse_requested_bool(data, key: str):
+        if key not in data:
+            return UserViewSet._BOOL_NOT_PROVIDED
+        try:
+            return BooleanField().to_internal_value(data.get(key))
+        except ValidationError:
+            # Let serializer validation report invalid values as 400 responses
+            return UserViewSet._BOOL_NOT_PROVIDED
+
     def create(self, request, *args, **kwargs):
-        if not request.user.is_superuser and request.data.get("is_superuser") is True:
-            return HttpResponseForbidden(
-                "Superuser status can only be granted by a superuser",
-            )
+        requested_is_superuser = self._parse_requested_bool(
+            request.data,
+            "is_superuser",
+        )
+        requested_is_staff = self._parse_requested_bool(request.data, "is_staff")
+
+        if not request.user.is_superuser:
+            if requested_is_superuser is True:
+                return HttpResponseForbidden(
+                    "Superuser status can only be granted by a superuser",
+                )
+            if requested_is_staff is True:
+                return HttpResponseForbidden(
+                    "Staff status can only be granted by a superuser",
+                )
+
         return super().create(request, *args, **kwargs)
 
     def update(self, request, *args, **kwargs):
         user_to_update: User = self.get_object()
+
         if not request.user.is_superuser and user_to_update.is_superuser:
             return HttpResponseForbidden(
                 "Superusers can only be modified by other superusers",
             )
+
+        requested_is_superuser = self._parse_requested_bool(
+            request.data,
+            "is_superuser",
+        )
+        requested_is_staff = self._parse_requested_bool(request.data, "is_staff")
+
         if (
             not request.user.is_superuser
-            and request.data.get("is_superuser") is not None
-            and request.data.get("is_superuser") != user_to_update.is_superuser
+            and requested_is_superuser is not self._BOOL_NOT_PROVIDED
+            and requested_is_superuser != user_to_update.is_superuser
         ):
             return HttpResponseForbidden(
                 "Superuser status can only be changed by a superuser",
             )
+        if (
+            not request.user.is_superuser
+            and requested_is_staff is not self._BOOL_NOT_PROVIDED
+            and requested_is_staff != user_to_update.is_staff
+        ):
+            return HttpResponseForbidden(
+                "Staff status can only be changed by a superuser",
+            )
         return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        user_to_delete: User = self.get_object()
+
+        if not request.user.is_superuser and user_to_delete.is_superuser:
+            return HttpResponseForbidden(
+                "Superusers can only be deleted by other superusers",
+            )
+
+        return super().destroy(request, *args, **kwargs)
 
     @extend_schema(
         request=None,
@@ -165,7 +227,7 @@ class UserViewSet(ModelViewSet):
             return HttpResponseNotFound("TOTP not found")
 
 
-class GroupViewSet(ModelViewSet):
+class GroupViewSet(ModelViewSet[Group]):
     model = Group
 
     queryset = Group.objects.order_by(Lower("name"))
@@ -178,7 +240,7 @@ class GroupViewSet(ModelViewSet):
     ordering_fields = ("name",)
 
 
-class ProfileView(GenericAPIView):
+class ProfileView(GenericAPIView[Any]):
     """
     User profile view, only available when logged in
     """
@@ -237,7 +299,7 @@ class ProfileView(GenericAPIView):
         },
     ),
 )
-class TOTPView(GenericAPIView):
+class TOTPView(GenericAPIView[Any]):
     """
     TOTP views
     """
@@ -317,7 +379,7 @@ class TOTPView(GenericAPIView):
         },
     ),
 )
-class GenerateAuthTokenView(GenericAPIView):
+class GenerateAuthTokenView(GenericAPIView[Any]):
     """
     Generates (or re-generates) an auth token, requires a logged in user
     unlike the default DRF endpoint
@@ -346,7 +408,7 @@ class GenerateAuthTokenView(GenericAPIView):
         },
     ),
 )
-class ApplicationConfigurationViewSet(ModelViewSet):
+class ApplicationConfigurationViewSet(ModelViewSet[ApplicationConfiguration]):
     model = ApplicationConfiguration
 
     queryset = ApplicationConfiguration.objects
@@ -357,6 +419,68 @@ class ApplicationConfigurationViewSet(ModelViewSet):
     @extend_schema(exclude=True)
     def create(self, request, *args, **kwargs):
         return Response(status=405)  # Not Allowed
+
+    def perform_update(self, serializer):
+        old_instance = ApplicationConfiguration.objects.all().first()
+        old_llm_embedding_backend = (
+            old_instance.llm_embedding_backend or settings.LLM_EMBEDDING_BACKEND
+        )
+        old_llm_embedding_chunk_size = (
+            old_instance.llm_embedding_chunk_size or settings.LLM_EMBEDDING_CHUNK_SIZE
+        )
+        old_llm_embedding_endpoint = (
+            old_instance.llm_embedding_endpoint or settings.LLM_EMBEDDING_ENDPOINT
+        )
+        old_llm_embedding_model = (
+            old_instance.llm_embedding_model or settings.LLM_EMBEDDING_MODEL
+        )
+        old_llm_context_size = (
+            old_instance.llm_context_size or settings.LLM_CONTEXT_SIZE
+        )
+
+        new_instance: ApplicationConfiguration = serializer.save()
+        new_llm_embedding_backend = (
+            new_instance.llm_embedding_backend or settings.LLM_EMBEDDING_BACKEND
+        )
+        new_ai_enabled = (
+            new_instance.ai_enabled
+            if new_instance.ai_enabled is not None
+            else settings.AI_ENABLED
+        )
+        new_ai_index_enabled = bool(
+            new_ai_enabled and new_llm_embedding_backend,
+        )
+        new_llm_embedding_chunk_size = (
+            new_instance.llm_embedding_chunk_size or settings.LLM_EMBEDDING_CHUNK_SIZE
+        )
+        new_llm_embedding_endpoint = (
+            new_instance.llm_embedding_endpoint or settings.LLM_EMBEDDING_ENDPOINT
+        )
+        new_llm_embedding_model = (
+            new_instance.llm_embedding_model or settings.LLM_EMBEDDING_MODEL
+        )
+        new_llm_context_size = (
+            new_instance.llm_context_size or settings.LLM_CONTEXT_SIZE
+        )
+
+        embedding_config_changed = (
+            old_llm_embedding_backend != new_llm_embedding_backend
+            or old_llm_embedding_chunk_size != new_llm_embedding_chunk_size
+            or old_llm_embedding_endpoint != new_llm_embedding_endpoint
+            or old_llm_embedding_model != new_llm_embedding_model
+            or old_llm_context_size != new_llm_context_size
+        )
+        from paperless_ai.indexing import llm_index_exists
+
+        rebuild_needed = new_ai_index_enabled and (
+            not llm_index_exists() or embedding_config_changed
+        )
+
+        if rebuild_needed:
+            llmindex_index.apply_async(
+                kwargs={"rebuild": True},
+                headers={"trigger_source": PaperlessTask.TriggerSource.SYSTEM},
+            )
 
 
 @extend_schema_view(
@@ -376,7 +500,7 @@ class ApplicationConfigurationViewSet(ModelViewSet):
         },
     ),
 )
-class DisconnectSocialAccountView(GenericAPIView):
+class DisconnectSocialAccountView(GenericAPIView[Any]):
     """
     Disconnects a social account provider from the user account
     """
@@ -402,7 +526,7 @@ class DisconnectSocialAccountView(GenericAPIView):
         },
     ),
 )
-class SocialAccountProvidersView(GenericAPIView):
+class SocialAccountProvidersView(GenericAPIView[Any]):
     """
     List of social account providers
     """
